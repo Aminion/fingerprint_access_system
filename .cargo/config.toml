@@ -1,0 +1,10 @@
+[target.thumbv6m-none-eabi]
+runner = "probe-rs run --chip STM32G031K8Tx"
+# Add these rustflags:
+rustflags = [
+  "-C", "link-arg=-Tlink.x",      # Standard Cortex-M linker script
+  "-C", "link-arg=-Tdefmt.x",    # Required for defmt logging
+]
+
+[build]
+target = "thumbv6m-none-eabi"
