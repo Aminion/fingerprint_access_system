@@ -25,20 +25,20 @@ async fn main(_spawner: Spawner) {
         Default::default(),
     );
 
-    let max_duty = pwm.get_max_duty() as u64;
+    let max_duty = pwm.get_max_duty();
     pwm.enable(embassy_stm32::timer::Channel::Ch1);
 
     loop {
         for i in 0..=100 {
-            let duty = ((i * max_duty) / 100) as u16;
+            let duty = i * (max_duty / 100);
             pwm.set_duty(embassy_stm32::timer::Channel::Ch1, duty);
-            Timer::after_millis(5).await;
+            Timer::after_millis(2).await;
         }
 
         for i in (0..=100).rev() {
-            let duty = ((i * max_duty) / 100) as u16;
+            let duty = i * (max_duty / 100);
             pwm.set_duty(embassy_stm32::timer::Channel::Ch1, duty);
-            Timer::after_millis(5).await;
+            Timer::after_millis(2).await;
         }
     }
 }

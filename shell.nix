@@ -5,7 +5,7 @@ let
   rustBuild = pkgs.rust-bin.stable.latest.default.override {
     targets = [ "thumbv6m-none-eabi" ];
     # ADD "rust-analyzer" TO THIS LIST:
-    extensions = [ "rust-src" "rust-analyzer" ]; 
+    extensions = [ "rust-src" "rust-analyzer" "llvm-tools"]; 
   };
 in
 pkgs.mkShell {
@@ -14,5 +14,8 @@ pkgs.mkShell {
     probe-rs-tools
     pkg-config
     libusb1
+    cargo-binutils
+    cargo-bloat
+    
   ];
 }
