@@ -1,23 +1,97 @@
 #![no_std]
 #![no_main]
 
-use defmt::info;
+use defmt::{error, info, warn};
 use embassy_executor::Spawner;
+use embassy_stm32 as _;
+use embassy_stm32::gpio::OutputType;
 use embassy_stm32::time::hz;
 use embassy_stm32::timer::simple_pwm::{PwmPin, SimplePwm};
-use embassy_stm32::Config;
+use embassy_stm32::timer::CountingMode;
+use embassy_stm32::usart::{InterruptHandler, Uart, UartRx};
+use embassy_stm32::{bind_interrupts, Config};
 use embassy_time::Timer;
 use {defmt_rtt as _, panic_probe as _};
 
+use embassy_stm32 as _;
+use embassy_stm32::peripherals::{DMA1_CH2, TIM1, USART2}; // Make sure to import this!
+
+mod fingerprint_sensor;
+
+#[embassy_executor::task]
+async fn serial_listener_task(
+    mut rx: UartRx<'static, USART2, DMA1_CH2>,
+    mut pwm: SimplePwm<'static, TIM1>,
+) {
+    let mut cmdBuff = [0u8; 16];
+    let mut curr = 0;
+
+    loop {
+        let mut buf = [0u8; 1];
+        match rx.read(&mut buf).await {
+            Ok(_) => {
+                let received = buf[0];
+                match received {
+                    b'\n' | b'\r' if curr > 0 => {
+                        match core::str::from_utf8(&cmdBuff[..curr]) {
+                            Ok(command) => {
+                                let mut lines = command.split_whitespace();
+                                match lines.next() {
+                                    Some("run") => {
+                                        unlock(&mut pwm).await;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            Err(_) => {
+                                info!("UTF-8 Error");
+                            }
+                        }
+                        curr = 0;
+                    }
+                    _ if curr < cmdBuff.len() => {
+                        cmdBuff[curr] = received;
+                        curr += 1;
+                    }
+                    _ => {
+                        warn!("Buffer Overflow");
+                        curr = 0;
+                    }
+                }
+            }
+            Err(e) => error!("UART Read Error: {:?}", e),
+        }
+    }
+}
+
+async fn unlock(pwm: &mut SimplePwm<'static, TIM1>) {
+    const CICK_MS: u64 = 50;
+    const HOLD_MS: u64 = 3000;
+    const HOLD_DUTY_DIVIDER: u16 = 3;
+    const CHANNEL: embassy_stm32::timer::Channel = embassy_stm32::timer::Channel::Ch1;
+
+    let max_duty = pwm.get_max_duty();
+    pwm.enable(CHANNEL);
+    pwm.set_duty(CHANNEL, max_duty);
+    Timer::after_millis(CICK_MS).await;
+    pwm.set_duty(CHANNEL, max_duty / HOLD_DUTY_DIVIDER);
+    Timer::after_millis(HOLD_MS).await;
+    pwm.set_duty(CHANNEL, 0);
+    pwm.disable(CHANNEL);
+}
+
+bind_interrupts!(struct Irqs {
+    USART1 => InterruptHandler<embassy_stm32::peripherals::USART1>;
+});
+
 #[embassy_executor::main]
-async fn main(_spawner: Spawner) {
-    let p = embassy_stm32::init(Config::default());
+async fn main(spawner: Spawner) {
+    let p = embassy_stm32::init(Default::default());
+
+    // 2. Setup PWM for the Solenoid (PA8 / D9)
     let mut pwm = SimplePwm::new(
-        p.TIM3,
-        Some(PwmPin::new_ch1(
-            p.PC6,
-            embassy_stm32::gpio::OutputType::PushPull,
-        )),
+        p.TIM1,                                             // Timer 1
+        Some(PwmPin::new_ch1(p.PA8, OutputType::PushPull)), // PA8 is D9
         None,
         None,
         None,
@@ -25,20 +99,67 @@ async fn main(_spawner: Spawner) {
         Default::default(),
     );
 
-    let max_duty = pwm.get_max_duty();
-    pwm.enable(embassy_stm32::timer::Channel::Ch1);
+    let mut uart_config = embassy_stm32::usart::Config::default();
+    uart_config.baudrate = 57_600;
+    // 1. Setup UART (Do NOT split yet)
+    let mut uart = Uart::new(
+        p.USART1,
+        p.PA10, // RX Pin (Connects to Sensor Yellow/TX)
+        p.PA9,  // TX Pin (Connects to Sensor White/RX)
+        Irqs,
+        p.DMA1_CH1,
+        p.DMA1_CH2,
+        uart_config,
+    )
+    .unwrap();
+
+    // 2. Define packets
+    // 1. Define the GenImg packet
+    let gen_img = [
+        0xEF, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0x01, 0x00, 0x03, 0x01, 0x00, 0x05,
+    ];
+
+    defmt::info!("Place your finger on the sensor now...");
+
+    let light_on = [
+        0xEF, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0x01, 0x00, 0x07, 0x35, // Command: Aura Control
+        0x01, // Control Mode: Breathing
+        0x05, // Speed
+        0x01, // Color: Blue
+        0x00, // Cycles
+        0x00, 0x44, // Checksum
+    ];
+
+    defmt::info!("Turning on the Aura light...");
+    uart.write(&light_on).await.unwrap();
+    let mut _discard = [0u8; 12];
+    uart.read(&mut _discard).await.unwrap(); // Always read the confirmation
 
     loop {
-        for i in 0..=100 {
-            let duty = i * (max_duty / 100);
-            pwm.set_duty(embassy_stm32::timer::Channel::Ch1, duty);
-            Timer::after_millis(2).await;
-        }
+        // 2. Send the command
+        uart.write(&gen_img).await.unwrap();
 
-        for i in (0..=100).rev() {
-            let duty = i * (max_duty / 100);
-            pwm.set_duty(embassy_stm32::timer::Channel::Ch1, duty);
-            Timer::after_millis(2).await;
+        // 3. Read the response (12 bytes)
+        let mut response = [0u8; 12];
+        uart.read(&mut response).await.unwrap();
+
+        let code = response[9];
+
+        match code {
+            0x00 => {
+                defmt::info!("FINGER DETECTED! Image captured.");
+                // Success! We can move to the next step (Img2Tz)
+                break;
+            }
+            0x02 => {
+                // This is the "No finger on sensor" error.
+                // We just loop until a finger is placed.
+                Timer::after_millis(100).await;
+            }
+            _ => {
+                defmt::error!("Unexpected error from sensor: {:x}", code);
+                break;
+            }
         }
     }
 }
