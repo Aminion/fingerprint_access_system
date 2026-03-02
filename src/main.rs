@@ -1,5 +1,7 @@
 #![no_std]
 #![no_main]
+#![feature(generic_const_exprs)]
+#![allow(incomplete_features)]
 
 use defmt::{error, info, warn};
 use embassy_executor::Spawner;
@@ -113,53 +115,11 @@ async fn main(spawner: Spawner) {
     )
     .unwrap();
 
-    // 2. Define packets
-    // 1. Define the GenImg packet
-    let gen_img = [
-        0xEF, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0x01, 0x00, 0x03, 0x01, 0x00, 0x05,
-    ];
-
-    defmt::info!("Place your finger on the sensor now...");
-
-    let light_on = [
-        0xEF, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0x01, 0x00, 0x07, 0x35, // Command: Aura Control
-        0x01, // Control Mode: Breathing
-        0x05, // Speed
-        0x01, // Color: Blue
-        0x00, // Cycles
-        0x00, 0x44, // Checksum
-    ];
-
-    defmt::info!("Turning on the Aura light...");
-    uart.write(&light_on).await.unwrap();
-    let mut _discard = [0u8; 12];
-    uart.read(&mut _discard).await.unwrap(); // Always read the confirmation
+    let mut s = fingerprint_sensor::FingerprintSensor::new(uart, [0x00, 0x00, 0x00, 0x00]);
 
     loop {
-        // 2. Send the command
-        uart.write(&gen_img).await.unwrap();
-
-        // 3. Read the response (12 bytes)
-        let mut response = [0u8; 12];
-        uart.read(&mut response).await.unwrap();
-
-        let code = response[9];
-
-        match code {
-            0x00 => {
-                defmt::info!("FINGER DETECTED! Image captured.");
-                // Success! We can move to the next step (Img2Tz)
-                break;
-            }
-            0x02 => {
-                // This is the "No finger on sensor" error.
-                // We just loop until a finger is placed.
-                Timer::after_millis(100).await;
-            }
-            _ => {
-                defmt::error!("Unexpected error from sensor: {:x}", code);
-                break;
-            }
-        }
+        let r = s.verify_password().await;
+        info!("Password verification result: {:?}", r);
+        Timer::after_millis(1000).await;
     }
 }

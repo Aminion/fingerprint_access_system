@@ -220,6 +220,7 @@ checksum = "a3d8701436bf0dc453703175459805045d049bf7404df7a68e59d05c7fbd1f04"
 dependencies = [
  "cortex-m",
  "critical-section",
+ "defmt 0.3.100",
  "document-features",
  "embassy-executor-macros",
 ]
