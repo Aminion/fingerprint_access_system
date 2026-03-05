@@ -1,0 +1,12 @@
+[toolchain]
+# Use the nightly channel to enable generic_const_exprs
+channel = "nightly"
+
+# The specific CPU architecture for STM32G031 (Cortex-M0+)
+targets = ["thumbv6m-none-eabi"]
+
+# Components required for embedded development and debugging
+components = ["rust-src", "llvm-tools-preview"]
+
+# Minimal profile reduces download size by skipping documentation
+profile = "minimal"
