@@ -1,9 +1,11 @@
-use core::{fmt, ops::Add};
+use core::{fmt, iter::Sum, ops::Add};
 use embassy_stm32::usart::{BasicInstance, RxDma, TxDma, Uart, UartRx, UartTx};
 use num_enum::TryFromPrimitive;
 
 /// Standard start code for all R503 packets (High byte: 0xEF, Low byte: 0x01)
 pub const START_CODE: u16 = 0xEF01;
+pub const START_CODE_H: u8 = (START_CODE >> 8) as u8;
+pub const START_CODE_L: u8 = (START_CODE & 0xFF) as u8;
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
@@ -157,6 +159,7 @@ impl defmt::Format for FingerError {
 
 pub struct FingerprintSensor<'a, T: BasicInstance, TXDMA, RXDMA> {
     uart: Uart<'a, T, TXDMA, RXDMA>,
+    address: [u8; 4],
     password: [u8; 4],
 }
 
@@ -166,14 +169,18 @@ where
     TXDMA: TxDma<T>, // This satisfies the bound for .write()
     RXDMA: RxDma<T>, // This satisfies the bound for .read()
 {
-    pub fn new(uart: Uart<'a, T, TXDMA, RXDMA>, password: [u8; 4]) -> Self {
-        Self { uart, password }
+    pub fn new(uart: Uart<'a, T, TXDMA, RXDMA>, address: [u8; 4], password: [u8; 4]) -> Self {
+        Self {
+            uart,
+            address,
+            password,
+        }
     }
     pub async fn verify_password(&mut self) -> Result<(), FingerError> {
         // 1. Prepare the command (Instruction 0x13 + 4-byte password)
         // We assume the default password here; you could also pass it as an argument.
         let password: [u8; 4] = [0x00, 0x00, 0x00, 0x00];
-        let cmd = create_verify_packet(password);
+        let cmd = Self::create_verify_packet(&self.address, password);
         let serialized_cmd = cmd;
 
         // 2. Send the command via UART
@@ -215,38 +222,46 @@ where
             }
         }
     }
+    // I also simplified this for you.
+    // In Rust, you can just return the result of the function call directly!
+    pub fn create_verify_packet(address: &[u8; 4], password: [u8; 4]) -> [u8; 16] {
+        packet(
+            PacketType::Command,
+            Instruction::VfyPwd,
+            &address,
+            &password,
+        )
+    }
 }
 
-/// Creates the complete 12-byte verification packet for a given password.
-/// Header(2) + Addr(4) + PID(1) + Len(2) + Ins(1) + Pwd(4) + Checksum(2) = 16 bytes total.
-pub fn create_verify_packet(password: [u8; 4]) -> [u8; 16] {
-    let mut pkt = [0u8; 16];
+pub fn packet<const N: usize>(
+    packet_type: PacketType,
+    instruction: Instruction,
+    address: &[u8; 4],
+    data: &[u8; N],
+) -> [u8; N + 12] {
+    let mut pkt = [0u8; N + 12];
+    let (len, sum) = checksum(packet_type, instruction, data);
 
-    // 1. Start Code (0xEF01)
-    pkt[0] = 0xEF;
-    pkt[1] = 0x01;
+    pkt[0] = START_CODE_H;
+    pkt[1] = START_CODE_L;
 
-    // 2. Default Address (0xFFFFFFFF)
-    pkt[2..6].copy_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF]);
+    // 4 bytes of Address
+    pkt[2..6].copy_from_slice(address);
 
-    // 3. Packet Identifier (0x01 = Command)
-    pkt[6] = 0x01;
+    pkt[6] = packet_type as u8;
 
-    // 4. Length (Instruction (1) + Password (4) + Checksum (2) = 7)
-    // Sent as Big-Endian u16
-    pkt[7] = 0x00;
-    pkt[8] = 0x07;
+    let (len_h, len_l) = split_to_bytes(len);
+    pkt[7] = len_h;
+    pkt[8] = len_l;
 
-    // 5. Instruction Code (0x13 = VfyPwd)
-    pkt[9] = 0x13;
+    pkt[9] = instruction as u8;
 
-    // 6. Password Data
-    pkt[10..14].copy_from_slice(&password);
+    pkt[10..10 + N].copy_from_slice(data);
 
-    let sum = checksum(PacketType::Command, Instruction::VfyPwd, &password);
-    let (high_byte, low_byte) = split_to_bytes(sum);
-    pkt[14] = high_byte;
-    pkt[15] = low_byte;
+    let (sum_h, sum_l) = split_to_bytes(sum);
+    pkt[10 + N] = sum_h;
+    pkt[10 + N + 1] = sum_l;
 
     pkt
 }
@@ -257,7 +272,7 @@ pub fn split_to_bytes(value: u16) -> (u8, u8) {
     (high_byte, low_byte)
 }
 
-pub fn checksum(packet_type: PacketType, instruction: Instruction, data: &[u8]) -> u16 {
+pub fn checksum(packet_type: PacketType, instruction: Instruction, data: &[u8]) -> (u16, u16) {
     let len = (1 + data.len() + 2) as u16;
     let (len_high_byte, len_low_byte) = split_to_bytes(len);
     let mut sum: u16 = 0;
@@ -269,5 +284,5 @@ pub fn checksum(packet_type: PacketType, instruction: Instruction, data: &[u8]) 
     for &b in data.iter() {
         sum = sum.wrapping_add(b as u16);
     }
-    sum
+    (len, sum)
 }
