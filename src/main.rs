@@ -125,6 +125,8 @@ async fn main(spawner: Spawner) {
         info!("Password verification");
         let r = s.verify_password().await;
         info!("Password verification result: {:?}", r);
+        let rr = s.generate_image().await;
+        info!("Image generation result: {:?}", rr);
         Timer::after_millis(1000).await;
     }
 }

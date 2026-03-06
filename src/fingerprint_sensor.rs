@@ -123,6 +123,8 @@ pub enum FingerError {
     /// 4. Unexpected Packet Type
     /// For example, receiving a Data packet when expecting an Acknowledgment
     UnexpectedPacket(PacketType),
+
+    NoFinger,
 }
 
 /// Implementation to allow embassy's UART error to be automatically
@@ -141,6 +143,7 @@ impl core::fmt::Display for FingerError {
             Self::Protocol(m) => write!(f, "Protocol Error: {}", m),
             Self::Sensor(c) => write!(f, "Sensor Error: {:?}", c),
             Self::UnexpectedPacket(p) => write!(f, "Unexpected Packet Type: {:?}", p),
+            Self::NoFinger => write!(f, "No Finger Detected"),
         }
     }
 }
@@ -155,7 +158,8 @@ impl defmt::Format for FingerError {
             FingerError::Sensor(code) => defmt::write!(fmt, "FingerError::Sensor({:?})", code),
             FingerError::UnexpectedPacket(p) => {
                 defmt::write!(fmt, "FingerError::UnexpectedPacket({:?})", p)
-            }
+            },
+            FingerError::NoFinger => defmt::write!(fmt, "FingerError::NoFinger"),
         }
     }
 }
@@ -210,11 +214,37 @@ where
         }
     }
 
+    pub async fn generate_image(&mut self) -> Result<(), FingerError> {
+        // GenImg has no data, so we pass an empty array
+        let cmd = packet(
+            PacketType::Command,
+            &self.address,
+            &[Instruction::GenImg as u8],
+        );
+
+        self.uart.write(&cmd).await?;
+
+        let mut rx_buf = [0u8; 12];
+        self.uart.read(&mut rx_buf).await?; // Or your while loop
+
+        let (_, _, payload, _) = try_parse_packet(&rx_buf)?;
+
+        let code: ConfirmationCode = payload[0]
+            .try_into()
+            .map_err(|_| FingerError::Protocol("Unknown Confirmation Code"))?;
+
+        match code {
+            ConfirmationCode::Ok => Ok(()),
+            ConfirmationCode::NoFinger => Err(FingerError::NoFinger),
+            _ => Err(FingerError::Sensor(code)),
+        }
+    }
+
     pub fn create_verify_packet(address: &[u8; 4], password: &[u8; 4]) -> [u8; 16] {
         let mut payload = [0u8; 5];
         payload[0] = Instruction::VfyPwd as u8;
         payload[1..5].copy_from_slice(password);
-        packet(PacketType::Command, &address, &payload)
+        packet(PacketType::Command, address, &payload)
     }
 }
 
