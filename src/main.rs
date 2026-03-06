@@ -117,11 +117,12 @@ async fn main(spawner: Spawner) {
 
     let mut s = fingerprint_sensor::FingerprintSensor::new(
         uart,
-        [0x00, 0x00, 0x00, 0x00],
+        [0xFF, 0xFF, 0xFF, 0xFF],
         [0x00, 0x00, 0x00, 0x00],
     );
 
     loop {
+        info!("Password verification");
         let r = s.verify_password().await;
         info!("Password verification result: {:?}", r);
         Timer::after_millis(1000).await;

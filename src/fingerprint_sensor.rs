@@ -103,6 +103,38 @@ pub enum ConfirmationCode {
     Unknown = 0xFF,
 }
 
+pub enum Packet {
+    Command(Command),
+    Acknowledgement(ConfirmationCode),
+}
+
+impl Packet {
+    pub fn from_b() {}
+    pub fn to_b(self) -> () {
+        match self {
+            _ => (),
+        }
+    }
+    pub fn code(self) -> PacketType {
+        match self {
+            Packet::Command(_) => PacketType::Command,
+            Packet::Acknowledgement(_) => PacketType::Acknowledgement,
+        }
+    }
+}
+
+pub enum Command {
+    VfyPwd([u8; 4]),
+}
+
+impl Command {
+    pub fn code(self) -> Instruction {
+        match self {
+            Command::VfyPwd(_) => Instruction::VfyPwd,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum FingerError {
     /// 1. Hardware/Communication errors (Timeout, Framing, Overrun)
@@ -177,16 +209,9 @@ where
         }
     }
     pub async fn verify_password(&mut self) -> Result<(), FingerError> {
-        // 1. Prepare the command (Instruction 0x13 + 4-byte password)
-        // We assume the default password here; you could also pass it as an argument.
-        let password: [u8; 4] = [0x00, 0x00, 0x00, 0x00];
-        let cmd = Self::create_verify_packet(&self.address, password);
-        let serialized_cmd = cmd;
+        let cmd = Self::create_verify_packet(&self.address, &self.password);
 
-        // 2. Send the command via UART
-        // The '?' operator will catch any embassy_stm32::usart::Error
-        // and convert it into FingerError::Uart automatically.
-        self.uart.write(&serialized_cmd).await?;
+        self.uart.write(&cmd).await?;
 
         // 3. Read the 12-byte response packet
         let mut rx_buf = [0u8; 12];
@@ -222,26 +247,22 @@ where
             }
         }
     }
-    // I also simplified this for you.
-    // In Rust, you can just return the result of the function call directly!
-    pub fn create_verify_packet(address: &[u8; 4], password: [u8; 4]) -> [u8; 16] {
-        packet(
-            PacketType::Command,
-            Instruction::VfyPwd,
-            &address,
-            &password,
-        )
+
+    pub fn create_verify_packet(address: &[u8; 4], password: &[u8; 4]) -> [u8; 16] {
+        let mut payload = [0u8; 5];
+        payload[0] = Instruction::VfyPwd as u8;
+        payload[1..5].copy_from_slice(password);
+        packet(PacketType::Command, &address, &payload)
     }
 }
 
 pub fn packet<const N: usize>(
     packet_type: PacketType,
-    instruction: Instruction,
     address: &[u8; 4],
     data: &[u8; N],
-) -> [u8; N + 12] {
-    let mut pkt = [0u8; N + 12];
-    let (len, sum) = checksum(packet_type, instruction, data);
+) -> [u8; N + 11] {
+    let mut pkt = [0u8; N + 11];
+    let (len, sum) = checksum(packet_type, data);
 
     pkt[0] = START_CODE_H;
     pkt[1] = START_CODE_L;
@@ -255,13 +276,11 @@ pub fn packet<const N: usize>(
     pkt[7] = len_h;
     pkt[8] = len_l;
 
-    pkt[9] = instruction as u8;
-
-    pkt[10..10 + N].copy_from_slice(data);
+    pkt[9..9 + N].copy_from_slice(data);
 
     let (sum_h, sum_l) = split_to_bytes(sum);
-    pkt[10 + N] = sum_h;
-    pkt[10 + N + 1] = sum_l;
+    pkt[9 + N] = sum_h;
+    pkt[9 + N + 1] = sum_l;
 
     pkt
 }
@@ -272,12 +291,11 @@ pub fn split_to_bytes(value: u16) -> (u8, u8) {
     (high_byte, low_byte)
 }
 
-pub fn checksum(packet_type: PacketType, instruction: Instruction, data: &[u8]) -> (u16, u16) {
-    let len = (1 + data.len() + 2) as u16;
+pub fn checksum(packet_type: PacketType, data: &[u8]) -> (u16, u16) {
+    let len = (data.len() + 2) as u16;
     let (len_high_byte, len_low_byte) = split_to_bytes(len);
     let mut sum: u16 = 0;
     sum = sum + packet_type as u16;
-    sum = sum + instruction as u16;
     sum = sum + len_high_byte as u16;
     sum = sum + len_low_byte as u16;
 
