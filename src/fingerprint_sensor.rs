@@ -1,5 +1,8 @@
 use core::{fmt, iter::Sum, ops::Add};
-use embassy_stm32::usart::{BasicInstance, RxDma, TxDma, Uart, UartRx, UartTx};
+use embassy_stm32::{
+    pac::{bdma::Ch, i2c::vals::Headr},
+    usart::{BasicInstance, RxDma, TxDma, Uart, UartRx, UartTx},
+};
 use num_enum::TryFromPrimitive;
 
 /// Standard start code for all R503 packets (High byte: 0xEF, Low byte: 0x01)
@@ -103,38 +106,6 @@ pub enum ConfirmationCode {
     Unknown = 0xFF,
 }
 
-pub enum Packet {
-    Command(Command),
-    Acknowledgement(ConfirmationCode),
-}
-
-impl Packet {
-    pub fn from_b() {}
-    pub fn to_b(self) -> () {
-        match self {
-            _ => (),
-        }
-    }
-    pub fn code(self) -> PacketType {
-        match self {
-            Packet::Command(_) => PacketType::Command,
-            Packet::Acknowledgement(_) => PacketType::Acknowledgement,
-        }
-    }
-}
-
-pub enum Command {
-    VfyPwd([u8; 4]),
-}
-
-impl Command {
-    pub fn code(self) -> Instruction {
-        match self {
-            Command::VfyPwd(_) => Instruction::VfyPwd,
-        }
-    }
-}
-
 #[derive(Debug)]
 pub enum FingerError {
     /// 1. Hardware/Communication errors (Timeout, Framing, Overrun)
@@ -217,23 +188,14 @@ where
         let mut rx_buf = [0u8; 12];
         self.uart.read(&mut rx_buf).await?;
 
-        // 4. Validate the Packet Header
-        let header = u16::from_be_bytes([rx_buf[0], rx_buf[1]]);
-        if header != START_CODE {
-            return Err(FingerError::Protocol("Invalid Start Code"));
-        }
+        let (packet_type, _, payload, _) = try_parse_packet(&rx_buf)?;
 
-        // 5. Verify the Packet Type
-        // Using TryFrom (from num_enum) to ensure the sensor sent an Acknowledge (0x07)
-        let pid = PacketType::try_from(rx_buf[6])
-            .map_err(|_| FingerError::Protocol("Invalid Packet Type"))?;
-
-        if pid != PacketType::Acknowledgement {
-            return Err(FingerError::UnexpectedPacket(pid));
+        if packet_type != PacketType::Acknowledgement {
+            return Err(FingerError::UnexpectedPacket(packet_type));
         }
 
         // 6. Check the Confirmation Code (Byte index 9)
-        let code: ConfirmationCode = rx_buf[9]
+        let code: ConfirmationCode = payload[0]
             .try_into()
             .map_err(|_| FingerError::Protocol("Unknown Confirmation Code"))?;
         match code {
@@ -254,6 +216,51 @@ where
         payload[1..5].copy_from_slice(password);
         packet(PacketType::Command, &address, &payload)
     }
+}
+
+pub fn try_parse_packet(data: &[u8]) -> Result<(PacketType, u16, &[u8], u16), FingerError> {
+    // 1. Check Header (Indices 0, 1)
+    let header = data
+        .get(0..2)
+        .map(|b| u16::from_be_bytes([b[0], b[1]]))
+        .ok_or(FingerError::Protocol("Missing Header"))?;
+
+    if header != START_CODE {
+        return Err(FingerError::Protocol("Invalid Start Code"));
+    }
+
+    // 2. Parse Packet Type (Index 6)
+    let packet_type = data
+        .get(6)
+        .copied()
+        .ok_or(FingerError::Protocol("Missing Packet Type"))
+        .and_then(|b| {
+            PacketType::try_from(b).map_err(|_| FingerError::Protocol("Invalid Packet Type"))
+        })?;
+
+    // 3. Parse Length (Indices 7, 8) -> Should be 7..9
+    let len = data
+        .get(7..9)
+        .map(|b| u16::from_be_bytes([b[0], b[1]]))
+        .ok_or(FingerError::Protocol("Missing Length"))?;
+
+    // Math Check: Total packet size is 9 + len.
+    // Example: If len is 7, total packet is 16 bytes.
+    let total_len = 9 + len as usize;
+
+    // 4. Extract Payload (Starts at index 9, ends 2 bytes before the total end)
+    let payload_end = total_len - 2;
+    let payload = data
+        .get(9..payload_end)
+        .ok_or(FingerError::Protocol("Missing Payload"))?;
+
+    // 5. Extract Checksum (The last two bytes of the packet)
+    let checksum = data
+        .get(payload_end..total_len)
+        .map(|b| u16::from_be_bytes([b[0], b[1]]))
+        .ok_or(FingerError::Protocol("Missing Checksum"))?;
+
+    Ok((packet_type, len, payload, checksum))
 }
 
 pub fn packet<const N: usize>(
