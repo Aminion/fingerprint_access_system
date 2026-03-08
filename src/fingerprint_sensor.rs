@@ -125,6 +125,24 @@ pub enum FingerError {
     UnexpectedPacket(PacketType),
 
     NoFinger,
+    NoMatch,
+}
+
+#[repr(u8)]
+pub enum LedMode {
+    Breathing = 0x01,
+    Flashing = 0x02,
+    AlwaysOn = 0x03,
+    AlwaysOff = 0x04,
+    GradualOn = 0x05,
+    GradualOff = 0x06,
+}
+
+#[repr(u8)]
+pub enum LedColor {
+    Red = 0x01,
+    Blue = 0x02,
+    Purple = 0x03,
 }
 
 /// Implementation to allow embassy's UART error to be automatically
@@ -144,6 +162,7 @@ impl core::fmt::Display for FingerError {
             Self::Sensor(c) => write!(f, "Sensor Error: {:?}", c),
             Self::UnexpectedPacket(p) => write!(f, "Unexpected Packet Type: {:?}", p),
             Self::NoFinger => write!(f, "No Finger Detected"),
+            Self::NoMatch => write!(f, "No Match Found"),
         }
     }
 }
@@ -158,8 +177,9 @@ impl defmt::Format for FingerError {
             FingerError::Sensor(code) => defmt::write!(fmt, "FingerError::Sensor({:?})", code),
             FingerError::UnexpectedPacket(p) => {
                 defmt::write!(fmt, "FingerError::UnexpectedPacket({:?})", p)
-            },
+            }
             FingerError::NoFinger => defmt::write!(fmt, "FingerError::NoFinger"),
+            FingerError::NoMatch => defmt::write!(fmt, "FingerError::NoMatch"),
         }
     }
 }
@@ -181,6 +201,32 @@ where
             uart,
             address,
             password,
+        }
+    }
+
+    pub async fn control_led(
+        &mut self,
+        mode: LedMode,
+        speed: u8,
+        color: LedColor,
+        cycles: u8,
+    ) -> Result<(), FingerError> {
+        // Data = Instruction (0x35) + Mode + Speed + Color + Cycles
+        let payload = [0x35, mode as u8, speed, color as u8, cycles];
+
+        let cmd = packet(PacketType::Command, &self.address, &payload);
+        self.uart.write(&cmd).await?;
+
+        let mut rx_buf = [0u8; 12];
+        self.uart.read(&mut rx_buf).await?;
+
+        let (_, _, res_payload, _) = try_parse_packet(&rx_buf)?;
+
+        // Check confirmation code at res_payload[0]
+        if res_payload[0] == 0x00 {
+            Ok(())
+        } else {
+            Err(FingerError::Sensor(res_payload[0].try_into().unwrap()))
         }
     }
     pub async fn verify_password(&mut self) -> Result<(), FingerError> {
@@ -240,11 +286,142 @@ where
         }
     }
 
+    pub async fn image_to_template(&mut self, buffer_id: u8) -> Result<(), FingerError> {
+        // Data = Instruction (1 byte) + BufferID (1 byte)
+        let payload = [Instruction::Img2Tz as u8, buffer_id];
+        let cmd = packet(PacketType::Command, &self.address, &payload);
+
+        self.uart.write(&cmd).await?;
+
+        let mut rx_buf = [0u8; 12];
+        self.uart.read(&mut rx_buf).await?;
+
+        let (_, _, res_payload, _) = try_parse_packet(&rx_buf)?;
+
+        let code: ConfirmationCode = res_payload[0]
+            .try_into()
+            .map_err(|_| FingerError::Protocol("Unknown Confirmation Code"))?;
+
+        match code {
+            ConfirmationCode::Ok => Ok(()),
+            _ => Err(FingerError::Sensor(code)),
+        }
+    }
+
+    pub async fn store_template(&mut self, buffer_id: u8, slot: u16) -> Result<(), FingerError> {
+        // Data = Instruction (1 byte) + BufferID (1 byte) + PageID (2 bytes)
+        let slot_bytes = slot.to_be_bytes();
+        let payload = [
+            Instruction::Store as u8,
+            buffer_id,
+            slot_bytes[0],
+            slot_bytes[1],
+        ];
+
+        let cmd = packet(PacketType::Command, &self.address, &payload);
+        self.uart.write(&cmd).await?;
+
+        let mut rx_buf = [0u8; 12];
+        self.uart.read(&mut rx_buf).await?;
+
+        let (_, _, res_payload, _) = try_parse_packet(&rx_buf)?;
+
+        let code: ConfirmationCode = res_payload[0]
+            .try_into()
+            .map_err(|_| FingerError::Protocol("Unknown Confirmation Code"))?;
+
+        match code {
+            ConfirmationCode::Ok => {
+                defmt::info!("Template stored successfully in slot {}", slot);
+                Ok(())
+            }
+            _ => Err(FingerError::Sensor(code)),
+        }
+    }
+
+    pub async fn create_model(&mut self) -> Result<(), FingerError> {
+        // Instruction 0x05: Combines Buffer 1 and Buffer 2
+        // result is stored back in BOTH Buffer 1 and 2 as a "Model"
+        let payload = [0x05];
+        let cmd = packet(PacketType::Command, &self.address, &payload);
+
+        self.uart.write(&cmd).await?;
+
+        let mut rx_buf = [0u8; 12];
+        self.uart.read(&mut rx_buf).await?;
+
+        let (_, _, res_payload, _) = try_parse_packet(&rx_buf)?;
+        let code: ConfirmationCode = res_payload[0]
+            .try_into()
+            .map_err(|_| FingerError::Protocol("Unknown Code"))?;
+
+        match code {
+            ConfirmationCode::Ok => Ok(()),
+            _ => Err(FingerError::Sensor(code)),
+        }
+    }
+
     pub fn create_verify_packet(address: &[u8; 4], password: &[u8; 4]) -> [u8; 16] {
         let mut payload = [0u8; 5];
         payload[0] = Instruction::VfyPwd as u8;
         payload[1..5].copy_from_slice(password);
         packet(PacketType::Command, address, &payload)
+    }
+
+    pub async fn search_database(
+        &mut self,
+        buffer_id: u8,
+        start_page: u16,
+        count: u16,
+    ) -> Result<(u16, u16), FingerError> {
+        // Parameters:
+        // 1. Instruction: 0x04
+        // 2. Buffer ID: Which RAM buffer to compare (1 or 2)
+        // 3. Start Page: Where to begin searching (2 bytes)
+        // 4. Page Num: How many slots to search (2 bytes)
+
+        let start_bytes = start_page.to_be_bytes();
+        let count_bytes = count.to_be_bytes();
+
+        let payload = [
+            0x04,
+            buffer_id,
+            start_bytes[0],
+            start_bytes[1],
+            count_bytes[0],
+            count_bytes[1],
+        ];
+
+        let cmd = packet(PacketType::Command, &self.address, &payload);
+        self.uart.write(&cmd).await?;
+
+        // Search response is 16 bytes:
+        // [Header(2), Addr(4), PID(1), Len(2), Code(1), PageID(2), Score(2), Checksum(2)]
+        let mut rx_buf = [0u8; 16];
+        self.uart.read(&mut rx_buf).await?;
+
+        let (_, _, res_payload, _) = try_parse_packet(&rx_buf)?;
+
+        let code: ConfirmationCode = res_payload[0]
+            .try_into()
+            .map_err(|_| FingerError::Protocol("Unknown Confirmation Code"))?;
+
+        match code {
+            ConfirmationCode::Ok => {
+                // Page ID is at payload[1..3]
+                let page_id = u16::from_be_bytes([res_payload[1], res_payload[2]]);
+                // Match Score is at payload[3..5]
+                let score = u16::from_be_bytes([res_payload[3], res_payload[4]]);
+
+                defmt::info!("Match found! Slot: {}, Score: {}", page_id, score);
+                Ok((page_id, score))
+            }
+            ConfirmationCode::NoFinger => {
+                defmt::warn!("No match found in the specified database range.");
+                Err(FingerError::NoMatch)
+            }
+            _ => Err(FingerError::Sensor(code)),
+        }
     }
 }
 

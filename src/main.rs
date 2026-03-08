@@ -3,6 +3,7 @@
 #![feature(generic_const_exprs)]
 #![allow(incomplete_features)]
 
+use crate::fingerprint_sensor::{LedColor, LedMode};
 use defmt::{error, info, warn};
 use embassy_executor::Spawner;
 use embassy_stm32 as _;
@@ -13,6 +14,7 @@ use embassy_stm32::timer::CountingMode;
 use embassy_stm32::usart::{InterruptHandler, Uart, UartRx};
 use embassy_stm32::{bind_interrupts, Config};
 use embassy_time::Timer;
+
 use {defmt_rtt as _, panic_probe as _};
 
 use embassy_stm32 as _;
@@ -121,12 +123,37 @@ async fn main(spawner: Spawner) {
         [0x00, 0x00, 0x00, 0x00],
     );
 
+    info!("Password verification");
+    let r1 = s.verify_password().await;
+    s.control_led(LedMode::Breathing, 0xFF, LedColor::Purple, 0x00)
+        .await;
+    return;
+    info!("FIRST");
+    Timer::after_millis(2000).await;
+
+    let r2 = s.generate_image().await;
+    info!("Template result: {:?}", r2);
+    let r3 = s.image_to_template(1).await;
+    info!("Store result: {:?}", r3);
+
+    info!("SECOND");
+    Timer::after_millis(2000).await;
+    let r4 = s.generate_image().await;
+    info!("Template result: {:?}", r4);
+    let r5 = s.image_to_template(2).await;
+    info!("Store result: {:?}", r5);
+
+    info!("Creating model");
+    let r6 = s.create_model().await;
+    info!("Model result: {:?}", r6);
+    let r7 = s.store_template(1, 1).await;
+    info!("Store result: {:?}", r7);
+
     loop {
-        info!("Password verification");
-        let r = s.verify_password().await;
-        info!("Password verification result: {:?}", r);
-        let rr = s.generate_image().await;
-        info!("Image generation result: {:?}", rr);
+        let r2 = s.generate_image().await;
+        let r3 = s.image_to_template(1).await;
+        let res = s.search_database(1, 0, 200).await;
+        info!("Search result: {:?}", res);
         Timer::after_millis(1000).await;
     }
 }
