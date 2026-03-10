@@ -4,51 +4,50 @@
 #![allow(incomplete_features)]
 
 use core::u64;
-
-use crate::fingerprint_sensor::{FingerError, LedColor, LedMode};
 use defmt::info;
 use embassy_executor::Spawner;
+use embassy_stm32 as _;
 use embassy_stm32 as _;
 use embassy_stm32::bind_interrupts;
 use embassy_stm32::exti::ExtiInput;
 use embassy_stm32::gpio::{Input, OutputType, Pull};
+use embassy_stm32::peripherals::{DMA1_CH1, DMA1_CH2, PB2, PB8, TIM1, USART1};
 use embassy_stm32::time::hz;
 use embassy_stm32::timer::simple_pwm::{PwmPin, SimplePwm};
 use embassy_stm32::usart::{InterruptHandler, Uart};
-use embassy_sync::signal::Signal;
-use embassy_time::{Instant, Timer};
-
-use {defmt_rtt as _, panic_probe as _};
-
-use embassy_stm32 as _;
-use embassy_stm32::peripherals::{DMA1_CH1, DMA1_CH2, PB2, PB8, TIM1, USART1}; // Make sure to import this!
-
-mod fingerprint_sensor;
-
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
+use embassy_sync::signal::Signal;
+use embassy_sync::watch::Watch;
+use embassy_time::Timer;
+
+use crate::fingerprint_sensor::{FingerError, LedColor, LedMode};
+mod fingerprint_sensor;
 
 static COMMAND_CHANNEL: Channel<CriticalSectionRawMutex, CommandEnvelope, 1> = Channel::new();
-use embassy_sync::watch::Watch;
 
-static IRQ: Watch<CriticalSectionRawMutex, bool, 2> = Watch::new();
+use {defmt_rtt as _, panic_probe as _};
+pub type MySensor = fingerprint_sensor::FingerprintSensor<'static, USART1, DMA1_CH1, DMA1_CH2>;
+static FINGERPRINT_IRQ_STATUS: Watch<CriticalSectionRawMutex, bool, 2> = Watch::new();
+
+const SENSOR_ADRESS: [u8; 4] = [0xFF, 0xFF, 0xFF, 0xFF];
+const SENSOR_PASSWORD: [u8; 4] = [0x00, 0x00, 0x00, 0x00];
 
 pub struct CommandEnvelope {
     pub cmd: SensorCommand,
-    pub reply_signal: &'static Signal<CriticalSectionRawMutex, ()>,
+    pub ending_signal: &'static Signal<CriticalSectionRawMutex, ()>,
 }
 
 #[derive(Clone, Copy)] // Commands should be small and easy to copy
 
 pub enum SensorCommand {
     ValidateAccess,
-    EnrollNewUser(u16), // You can pass data like a Target ID
-    Cancel,
+    EnrollNewUser,
 }
 
 #[embassy_executor::task]
-async fn button_listener3_task(mut pin: ExtiInput<'static, PB2>) {
-    let sender = IRQ.sender();
+async fn fingerprint_irq_task(mut pin: ExtiInput<'static, PB2>) {
+    let sender = FINGERPRINT_IRQ_STATUS.sender();
 
     loop {
         pin.wait_for_any_edge().await;
@@ -62,37 +61,34 @@ async fn button_listener3_task(mut pin: ExtiInput<'static, PB2>) {
 }
 
 #[embassy_executor::task]
-async fn button_listener_task() {
-    static INIT_DONE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
-    let mut receiver = IRQ.receiver().unwrap();
+async fn unlock_task() {
+    static UNLOCK_DONE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+    let mut receiver = FINGERPRINT_IRQ_STATUS.receiver().unwrap();
     loop {
         let _ = receiver.changed_and(|v| *v).await;
-        let result = COMMAND_CHANNEL.try_send(CommandEnvelope {
+        let _ = COMMAND_CHANNEL.try_send(CommandEnvelope {
             cmd: SensorCommand::ValidateAccess,
-            reply_signal: &INIT_DONE,
+            ending_signal: &UNLOCK_DONE,
         });
-        if result.is_ok() {
-            INIT_DONE.wait().await;
-        }
+        UNLOCK_DONE.wait().await;
     }
 }
 
 #[embassy_executor::task]
-async fn button_listener2_task(mut pin: ExtiInput<'static, PB8>) {
+async fn add_new_finger_task(mut pin: ExtiInput<'static, PB8>) {
     static INIT_DONE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
     loop {
         pin.wait_for_low().await;
+
         COMMAND_CHANNEL
             .send(CommandEnvelope {
-                cmd: SensorCommand::EnrollNewUser(0),
-                reply_signal: &INIT_DONE,
+                cmd: SensorCommand::EnrollNewUser,
+                ending_signal: &INIT_DONE,
             })
             .await;
         INIT_DONE.wait().await;
     }
 }
-
-pub type MySensor = fingerprint_sensor::FingerprintSensor<'static, USART1, DMA1_CH1, DMA1_CH2>;
 
 #[embassy_executor::task]
 async fn fingerprint_manager_task(mut sensor: MySensor) {
@@ -102,7 +98,7 @@ async fn fingerprint_manager_task(mut sensor: MySensor) {
             .await
     }
     async fn finger_on_sensor(expected_state: bool) {
-        let mut receiver = IRQ.receiver().unwrap();
+        let mut receiver = FINGERPRINT_IRQ_STATUS.receiver().unwrap();
         Timer::after_millis(1000).await;
         loop {
             if receiver.get().await == expected_state {
@@ -112,11 +108,9 @@ async fn fingerprint_manager_task(mut sensor: MySensor) {
         }
     }
     loop {
-        // Wait for any button to send a command
         let cmd = COMMAND_CHANNEL.receive().await;
         match cmd.cmd {
             SensorCommand::ValidateAccess => {
-                info!("Validating access...");
                 let result: Result<_, FingerError> = async {
                     led(&mut sensor, LedColor::Purple).await?;
                     sensor.generate_image().await?;
@@ -147,19 +141,15 @@ async fn fingerprint_manager_task(mut sensor: MySensor) {
                         .ok();
                 }
             }
-            SensorCommand::EnrollNewUser(target_id) => loop {
-                info!("Enrolling new user...");
+            SensorCommand::EnrollNewUser => loop {
                 let result: Result<_, FingerError> = async {
                     for i in 1..=2u8 {
-                        info!("{}", i);
                         led(&mut sensor, LedColor::Purple).await?;
                         finger_on_sensor(true).await;
-                        info!("DOWN");
                         sensor.generate_image().await?;
                         sensor.image_to_template(i).await?;
                         led(&mut sensor, LedColor::Blue).await?;
                         finger_on_sensor(false).await;
-                        info!("UP");
                     }
                     sensor.create_model().await?;
                     sensor.store_template(1, 1).await?;
@@ -168,7 +158,6 @@ async fn fingerprint_manager_task(mut sensor: MySensor) {
                 }
                 .await;
                 if result.is_ok() {
-                    info!("Finger enrolled successfully!");
                     sensor
                         .control_led(
                             LedMode::Flashing,
@@ -184,8 +173,7 @@ async fn fingerprint_manager_task(mut sensor: MySensor) {
             },
             _ => (),
         }
-        COMMAND_CHANNEL.clear();
-        cmd.reply_signal.signal(());
+        cmd.ending_signal.signal(());
     }
 }
 
@@ -211,20 +199,16 @@ bind_interrupts!(struct Irqs {
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    IRQ.sender().send(false);
+    FINGERPRINT_IRQ_STATUS.sender().send(false);
     let p = embassy_stm32::init(Default::default());
-
-    // Setup button input on PB2 (D7)
     let button_pin = Input::new(p.PB2, Pull::Up);
     let button_exti = ExtiInput::new(button_pin, p.EXTI2);
-
     let button_pin = Input::new(p.PB8, Pull::Up);
     let button2_exti = ExtiInput::new(button_pin, p.EXTI8);
 
-    // 2. Setup PWM for the Solenoid (PA8 / D9)
     let pwm = SimplePwm::new(
-        p.TIM1,                                             // Timer 1
-        Some(PwmPin::new_ch1(p.PA8, OutputType::PushPull)), // PA8 is D9
+        p.TIM1,
+        Some(PwmPin::new_ch1(p.PA8, OutputType::PushPull)),
         None,
         None,
         None,
@@ -232,17 +216,12 @@ async fn main(spawner: Spawner) {
         Default::default(),
     );
 
-    spawner.spawn(button_listener_task()).unwrap();
-    spawner.spawn(button_listener2_task(button2_exti)).unwrap();
-    spawner.spawn(button_listener3_task(button_exti)).unwrap();
-
     let mut uart_config = embassy_stm32::usart::Config::default();
     uart_config.baudrate = 57_600;
-    // 1. Setup UART (Do NOT split yet)
     let uart = Uart::new(
         p.USART1,
-        p.PA10, // RX Pin (Connects to Sensor Yellow/TX)
-        p.PA9,  // TX Pin (Connects to Sensor White/RX)
+        p.PA10,
+        p.PA9,
         Irqs,
         p.DMA1_CH1,
         p.DMA1_CH2,
@@ -250,17 +229,16 @@ async fn main(spawner: Spawner) {
     )
     .unwrap();
 
-    let mut s = fingerprint_sensor::FingerprintSensor::new(
-        uart,
-        [0xFF, 0xFF, 0xFF, 0xFF],
-        [0x00, 0x00, 0x00, 0x00],
-    );
+    let mut sensor =
+        fingerprint_sensor::FingerprintSensor::new(uart, SENSOR_ADRESS, SENSOR_PASSWORD);
+    let _ = sensor.verify_password().await;
 
-    info!("Password verification");
-    let _ = s.verify_password().await;
+    spawner.spawn(unlock_task()).unwrap();
+    spawner.spawn(add_new_finger_task(button2_exti)).unwrap();
+    spawner.spawn(fingerprint_irq_task(button_exti)).unwrap();
+    spawner.spawn(fingerprint_manager_task(sensor)).unwrap();
 
-    spawner.spawn(fingerprint_manager_task(s)).unwrap();
     loop {
-        Timer::after_millis(1000000).await;
+        Timer::after_secs(u32::MAX as u64).await;
     }
 }
