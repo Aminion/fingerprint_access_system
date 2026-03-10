@@ -456,6 +456,7 @@ dependencies = [
  "defmt 0.3.100",
  "defmt-rtt",
  "embassy-executor",
+ "embassy-futures",
  "embassy-stm32",
  "embassy-sync 0.6.2",
  "embassy-time",

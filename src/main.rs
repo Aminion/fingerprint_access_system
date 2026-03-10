@@ -16,7 +16,7 @@ use embassy_stm32::time::hz;
 use embassy_stm32::timer::simple_pwm::{PwmPin, SimplePwm};
 use embassy_stm32::usart::{InterruptHandler, Uart};
 use embassy_sync::signal::Signal;
-use embassy_time::Timer;
+use embassy_time::{Instant, Timer};
 
 use {defmt_rtt as _, panic_probe as _};
 
@@ -25,12 +25,10 @@ use embassy_stm32::peripherals::{DMA1_CH1, DMA1_CH2, PB2, PB8, TIM1, USART1}; //
 
 mod fingerprint_sensor;
 
-use core::sync::atomic::AtomicBool;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 
-static COMMAND_CHANNEL: Channel<CriticalSectionRawMutex, CommandEnvelope, 5> = Channel::new();
-static FINGER_PLACED: AtomicBool = AtomicBool::new(false);
+static COMMAND_CHANNEL: Channel<CriticalSectionRawMutex, CommandEnvelope, 1> = Channel::new();
 use embassy_sync::watch::Watch;
 
 static IRQ: Watch<CriticalSectionRawMutex, bool, 2> = Watch::new();
@@ -51,11 +49,15 @@ pub enum SensorCommand {
 #[embassy_executor::task]
 async fn button_listener3_task(mut pin: ExtiInput<'static, PB2>) {
     let sender = IRQ.sender();
+
     loop {
-        pin.wait_for_low().await;
-        sender.send(true);
-        pin.wait_for_high().await;
-        sender.send(false);
+        pin.wait_for_any_edge().await;
+        let f_sample = pin.is_low();
+        Timer::after_millis(100).await;
+        let s_sample = pin.is_low();
+        if f_sample == s_sample {
+            sender.send(s_sample);
+        }
     }
 }
 
@@ -65,8 +67,6 @@ async fn button_listener_task() {
     let mut receiver = IRQ.receiver().unwrap();
     loop {
         let _ = receiver.changed_and(|v| *v).await;
-
-        info!("D7 (PB2) pressed, unlocking!");
         let result = COMMAND_CHANNEL.try_send(CommandEnvelope {
             cmd: SensorCommand::ValidateAccess,
             reply_signal: &INIT_DONE,
@@ -96,41 +96,36 @@ pub type MySensor = fingerprint_sensor::FingerprintSensor<'static, USART1, DMA1_
 
 #[embassy_executor::task]
 async fn fingerprint_manager_task(mut sensor: MySensor) {
+    async fn led(sensor: &mut MySensor, color: LedColor) -> Result<(), FingerError> {
+        sensor
+            .control_led(LedMode::AlwaysOn, 0x20, color, 0x3)
+            .await
+    }
     async fn finger_on_sensor(expected_state: bool) {
         let mut receiver = IRQ.receiver().unwrap();
+        Timer::after_millis(1000).await;
         loop {
-            // 1. Check current state (Synchronous)
             if receiver.get().await == expected_state {
                 return;
             }
-
-            // 2. Wait for the NEXT change (Asynchronous)
-            // This will wake up whenever sender.write() is called
             receiver.changed().await;
         }
     }
     loop {
         // Wait for any button to send a command
         let cmd = COMMAND_CHANNEL.receive().await;
-        info!("TEST");
         match cmd.cmd {
             SensorCommand::ValidateAccess => {
                 info!("Validating access...");
-                sensor
-                    .control_led(
-                        LedMode::Flashing,
-                        0xFF, // Speed: 0x20 is a nice, slow human-like breath. 0xFF is "turbo" speed.
-                        LedColor::Purple,
-                        0x1, // Cycles: 0xFF usually means "Infinite"
-                    )
-                    .await
-                    .ok();
-
-                let r2 = sensor.generate_image().await;
-                let r3 = sensor.image_to_template(1).await;
-
-                let res = sensor.search_database(1, 0, 200).await;
-                if res.is_ok() {
+                let result: Result<_, FingerError> = async {
+                    led(&mut sensor, LedColor::Purple).await?;
+                    sensor.generate_image().await?;
+                    sensor.image_to_template(1).await?;
+                    sensor.search_database(1, 0, 200).await?;
+                    Ok(())
+                }
+                .await;
+                if result.is_ok() {
                     sensor
                         .control_led(
                             LedMode::Breathing,
@@ -151,41 +146,46 @@ async fn fingerprint_manager_task(mut sensor: MySensor) {
                         .await
                         .ok();
                 }
-                cmd.reply_signal.signal(());
             }
             SensorCommand::EnrollNewUser(target_id) => loop {
+                info!("Enrolling new user...");
                 let result: Result<_, FingerError> = async {
-                    sensor
-                        .control_led(LedMode::Flashing, 0x20, LedColor::Red, 0x3)
-                        .await
-                        .ok();
-                    sensor.generate_image().await?;
-                    sensor.image_to_template(1).await?;
-                    sensor
-                        .control_led(LedMode::Flashing, 0x20, LedColor::Blue, 0x3)
-                        .await
-                        .ok();
-                    Timer::after_millis(1000).await;
-                    sensor.generate_image().await?;
-                    sensor.image_to_template(2).await?;
-
+                    for i in 1..=2u8 {
+                        info!("{}", i);
+                        led(&mut sensor, LedColor::Purple).await?;
+                        finger_on_sensor(true).await;
+                        info!("DOWN");
+                        sensor.generate_image().await?;
+                        sensor.image_to_template(i).await?;
+                        led(&mut sensor, LedColor::Blue).await?;
+                        finger_on_sensor(false).await;
+                        info!("UP");
+                    }
                     sensor.create_model().await?;
                     sensor.store_template(1, 1).await?;
-                    sensor
-                        .control_led(LedMode::Flashing, 0x20, LedColor::Blue, 0x3)
-                        .await
-                        .ok();
+
                     Ok(())
                 }
                 .await;
                 if result.is_ok() {
                     info!("Finger enrolled successfully!");
+                    sensor
+                        .control_led(
+                            LedMode::Flashing,
+                            0x20, // Speed: 0x20 is a nice, slow human-like breath. 0xFF is "turbo" speed.
+                            LedColor::Blue,
+                            0x3, // Cycles: 0xFF usually means "Infinite"
+                        )
+                        .await
+                        .ok();
+                    finger_on_sensor(false).await;
                     break;
                 }
-                cmd.reply_signal.signal(());
             },
             _ => (),
         }
+        COMMAND_CHANNEL.clear();
+        cmd.reply_signal.signal(());
     }
 }
 
@@ -239,7 +239,7 @@ async fn main(spawner: Spawner) {
     let mut uart_config = embassy_stm32::usart::Config::default();
     uart_config.baudrate = 57_600;
     // 1. Setup UART (Do NOT split yet)
-    let mut uart = Uart::new(
+    let uart = Uart::new(
         p.USART1,
         p.PA10, // RX Pin (Connects to Sensor Yellow/TX)
         p.PA9,  // TX Pin (Connects to Sensor White/RX)
@@ -257,38 +257,10 @@ async fn main(spawner: Spawner) {
     );
 
     info!("Password verification");
-    let r1 = s.verify_password().await;
+    let _ = s.verify_password().await;
 
     spawner.spawn(fingerprint_manager_task(s)).unwrap();
     loop {
         Timer::after_millis(1000000).await;
-    }
-    return;
-    info!("FIRST");
-
-    let r2 = s.generate_image().await;
-    info!("Template result: {:?}", r2);
-    let r3 = s.image_to_template(1).await;
-    info!("Store result: {:?}", r3);
-
-    info!("SECOND");
-    Timer::after_millis(2000).await;
-    let r4 = s.generate_image().await;
-    info!("Template result: {:?}", r4);
-    let r5 = s.image_to_template(2).await;
-    info!("Store result: {:?}", r5);
-
-    info!("Creating model");
-    let r6 = s.create_model().await;
-    info!("Model result: {:?}", r6);
-    let r7 = s.store_template(1, 1).await;
-    info!("Store result: {:?}", r7);
-
-    loop {
-        let r2 = s.generate_image().await;
-        let r3 = s.image_to_template(1).await;
-        let res = s.search_database(1, 0, 200).await;
-        info!("Search result: {:?}", res);
-        Timer::after_millis(1000).await;
     }
 }
