@@ -204,6 +204,14 @@ where
         }
     }
 
+    pub async fn led_breathing_infinite(&mut self, color: LedColor) -> Result<(), FingerError> {
+        self.control_led(LedMode::Breathing, 0xFF, color, 0x00).await
+    }
+
+    pub async fn led_off(&mut self) -> Result<(), FingerError> {
+        self.control_led(LedMode::AlwaysOff, 0, LedColor::Red, 0).await
+    }
+
     pub async fn control_led(
         &mut self,
         mode: LedMode,

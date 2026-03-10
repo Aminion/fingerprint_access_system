@@ -3,67 +3,188 @@
 #![feature(generic_const_exprs)]
 #![allow(incomplete_features)]
 
-use crate::fingerprint_sensor::{LedColor, LedMode};
-use defmt::{error, info, warn};
+use core::u64;
+
+use crate::fingerprint_sensor::{FingerError, LedColor, LedMode};
+use defmt::info;
 use embassy_executor::Spawner;
 use embassy_stm32 as _;
-use embassy_stm32::gpio::OutputType;
+use embassy_stm32::bind_interrupts;
+use embassy_stm32::exti::ExtiInput;
+use embassy_stm32::gpio::{Input, OutputType, Pull};
 use embassy_stm32::time::hz;
 use embassy_stm32::timer::simple_pwm::{PwmPin, SimplePwm};
-use embassy_stm32::timer::CountingMode;
-use embassy_stm32::usart::{InterruptHandler, Uart, UartRx};
-use embassy_stm32::{bind_interrupts, Config};
+use embassy_stm32::usart::{InterruptHandler, Uart};
+use embassy_sync::signal::Signal;
 use embassy_time::Timer;
 
 use {defmt_rtt as _, panic_probe as _};
 
 use embassy_stm32 as _;
-use embassy_stm32::peripherals::{DMA1_CH2, TIM1, USART2}; // Make sure to import this!
+use embassy_stm32::peripherals::{DMA1_CH1, DMA1_CH2, PB2, PB8, TIM1, USART1}; // Make sure to import this!
 
 mod fingerprint_sensor;
 
-#[embassy_executor::task]
-async fn serial_listener_task(
-    mut rx: UartRx<'static, USART2, DMA1_CH2>,
-    mut pwm: SimplePwm<'static, TIM1>,
-) {
-    let mut cmdBuff = [0u8; 16];
-    let mut curr = 0;
+use core::sync::atomic::AtomicBool;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::channel::Channel;
 
+static COMMAND_CHANNEL: Channel<CriticalSectionRawMutex, CommandEnvelope, 5> = Channel::new();
+static FINGER_PLACED: AtomicBool = AtomicBool::new(false);
+use embassy_sync::watch::Watch;
+
+static IRQ: Watch<CriticalSectionRawMutex, bool, 2> = Watch::new();
+
+pub struct CommandEnvelope {
+    pub cmd: SensorCommand,
+    pub reply_signal: &'static Signal<CriticalSectionRawMutex, ()>,
+}
+
+#[derive(Clone, Copy)] // Commands should be small and easy to copy
+
+pub enum SensorCommand {
+    ValidateAccess,
+    EnrollNewUser(u16), // You can pass data like a Target ID
+    Cancel,
+}
+
+#[embassy_executor::task]
+async fn button_listener3_task(mut pin: ExtiInput<'static, PB2>) {
+    let sender = IRQ.sender();
     loop {
-        let mut buf = [0u8; 1];
-        match rx.read(&mut buf).await {
-            Ok(_) => {
-                let received = buf[0];
-                match received {
-                    b'\n' | b'\r' if curr > 0 => {
-                        match core::str::from_utf8(&cmdBuff[..curr]) {
-                            Ok(command) => {
-                                let mut lines = command.split_whitespace();
-                                match lines.next() {
-                                    Some("run") => {
-                                        unlock(&mut pwm).await;
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            Err(_) => {
-                                info!("UTF-8 Error");
-                            }
-                        }
-                        curr = 0;
-                    }
-                    _ if curr < cmdBuff.len() => {
-                        cmdBuff[curr] = received;
-                        curr += 1;
-                    }
-                    _ => {
-                        warn!("Buffer Overflow");
-                        curr = 0;
-                    }
-                }
+        pin.wait_for_low().await;
+        sender.send(true);
+        pin.wait_for_high().await;
+        sender.send(false);
+    }
+}
+
+#[embassy_executor::task]
+async fn button_listener_task() {
+    static INIT_DONE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+    let mut receiver = IRQ.receiver().unwrap();
+    loop {
+        let _ = receiver.changed_and(|v| *v).await;
+
+        info!("D7 (PB2) pressed, unlocking!");
+        let result = COMMAND_CHANNEL.try_send(CommandEnvelope {
+            cmd: SensorCommand::ValidateAccess,
+            reply_signal: &INIT_DONE,
+        });
+        if result.is_ok() {
+            INIT_DONE.wait().await;
+        }
+    }
+}
+
+#[embassy_executor::task]
+async fn button_listener2_task(mut pin: ExtiInput<'static, PB8>) {
+    static INIT_DONE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+    loop {
+        pin.wait_for_low().await;
+        COMMAND_CHANNEL
+            .send(CommandEnvelope {
+                cmd: SensorCommand::EnrollNewUser(0),
+                reply_signal: &INIT_DONE,
+            })
+            .await;
+        INIT_DONE.wait().await;
+    }
+}
+
+pub type MySensor = fingerprint_sensor::FingerprintSensor<'static, USART1, DMA1_CH1, DMA1_CH2>;
+
+#[embassy_executor::task]
+async fn fingerprint_manager_task(mut sensor: MySensor) {
+    async fn finger_on_sensor(expected_state: bool) {
+        let mut receiver = IRQ.receiver().unwrap();
+        loop {
+            // 1. Check current state (Synchronous)
+            if receiver.get().await == expected_state {
+                return;
             }
-            Err(e) => error!("UART Read Error: {:?}", e),
+
+            // 2. Wait for the NEXT change (Asynchronous)
+            // This will wake up whenever sender.write() is called
+            receiver.changed().await;
+        }
+    }
+    loop {
+        // Wait for any button to send a command
+        let cmd = COMMAND_CHANNEL.receive().await;
+        info!("TEST");
+        match cmd.cmd {
+            SensorCommand::ValidateAccess => {
+                info!("Validating access...");
+                sensor
+                    .control_led(
+                        LedMode::Flashing,
+                        0xFF, // Speed: 0x20 is a nice, slow human-like breath. 0xFF is "turbo" speed.
+                        LedColor::Purple,
+                        0x1, // Cycles: 0xFF usually means "Infinite"
+                    )
+                    .await
+                    .ok();
+
+                let r2 = sensor.generate_image().await;
+                let r3 = sensor.image_to_template(1).await;
+
+                let res = sensor.search_database(1, 0, 200).await;
+                if res.is_ok() {
+                    sensor
+                        .control_led(
+                            LedMode::Breathing,
+                            0xFF, // Speed: 0x20 is a nice, slow human-like breath. 0xFF is "turbo" speed.
+                            LedColor::Blue,
+                            0x3, // Cycles: 0xFF usually means "Infinite"
+                        )
+                        .await
+                        .ok();
+                } else {
+                    sensor
+                        .control_led(
+                            LedMode::Breathing,
+                            0x20, // Speed: 0x20 is a nice, slow human-like breath. 0xFF is "turbo" speed.
+                            LedColor::Red,
+                            0x3, // Cycles: 0xFF usually means "Infinite"
+                        )
+                        .await
+                        .ok();
+                }
+                cmd.reply_signal.signal(());
+            }
+            SensorCommand::EnrollNewUser(target_id) => loop {
+                let result: Result<_, FingerError> = async {
+                    sensor
+                        .control_led(LedMode::Flashing, 0x20, LedColor::Red, 0x3)
+                        .await
+                        .ok();
+                    sensor.generate_image().await?;
+                    sensor.image_to_template(1).await?;
+                    sensor
+                        .control_led(LedMode::Flashing, 0x20, LedColor::Blue, 0x3)
+                        .await
+                        .ok();
+                    Timer::after_millis(1000).await;
+                    sensor.generate_image().await?;
+                    sensor.image_to_template(2).await?;
+
+                    sensor.create_model().await?;
+                    sensor.store_template(1, 1).await?;
+                    sensor
+                        .control_led(LedMode::Flashing, 0x20, LedColor::Blue, 0x3)
+                        .await
+                        .ok();
+                    Ok(())
+                }
+                .await;
+                if result.is_ok() {
+                    info!("Finger enrolled successfully!");
+                    break;
+                }
+                cmd.reply_signal.signal(());
+            },
+            _ => (),
         }
     }
 }
@@ -90,10 +211,18 @@ bind_interrupts!(struct Irqs {
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
+    IRQ.sender().send(false);
     let p = embassy_stm32::init(Default::default());
 
+    // Setup button input on PB2 (D7)
+    let button_pin = Input::new(p.PB2, Pull::Up);
+    let button_exti = ExtiInput::new(button_pin, p.EXTI2);
+
+    let button_pin = Input::new(p.PB8, Pull::Up);
+    let button2_exti = ExtiInput::new(button_pin, p.EXTI8);
+
     // 2. Setup PWM for the Solenoid (PA8 / D9)
-    let mut pwm = SimplePwm::new(
+    let pwm = SimplePwm::new(
         p.TIM1,                                             // Timer 1
         Some(PwmPin::new_ch1(p.PA8, OutputType::PushPull)), // PA8 is D9
         None,
@@ -102,6 +231,10 @@ async fn main(spawner: Spawner) {
         hz(10000),
         Default::default(),
     );
+
+    spawner.spawn(button_listener_task()).unwrap();
+    spawner.spawn(button_listener2_task(button2_exti)).unwrap();
+    spawner.spawn(button_listener3_task(button_exti)).unwrap();
 
     let mut uart_config = embassy_stm32::usart::Config::default();
     uart_config.baudrate = 57_600;
@@ -125,11 +258,13 @@ async fn main(spawner: Spawner) {
 
     info!("Password verification");
     let r1 = s.verify_password().await;
-    s.control_led(LedMode::Breathing, 0xFF, LedColor::Purple, 0x00)
-        .await;
+
+    spawner.spawn(fingerprint_manager_task(s)).unwrap();
+    loop {
+        Timer::after_millis(1000000).await;
+    }
     return;
     info!("FIRST");
-    Timer::after_millis(2000).await;
 
     let r2 = s.generate_image().await;
     info!("Template result: {:?}", r2);
