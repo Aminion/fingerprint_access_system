@@ -1,3 +1,4 @@
+use defmt::info;
 use embassy_stm32 as _;
 use embassy_stm32 as _;
 use embassy_stm32::exti::ExtiInput;
@@ -8,7 +9,7 @@ use embassy_sync::signal::Signal;
 use embassy_time::Timer;
 
 use crate::fingerprint_irq_task::FINGERPRINT_IRQ_STATUS;
-use crate::fingerprint_sensor::{FingerError, LedColor, LedMode};
+use crate::fingerprint_sensor::{FingerError, LedColor, LedEffect, LedMode};
 use crate::MySensor;
 
 pub static FINGERPRINT_CHANNEL: Channel<CriticalSectionRawMutex, CommandEnvelope, 1> =
@@ -26,13 +27,27 @@ pub struct CommandEnvelope {
     pub ending_signal: &'static Signal<CriticalSectionRawMutex, ()>,
 }
 
+static EFFECT_IN_PROGRESS: LedEffect = LedEffect {
+    mode: LedMode::AlwaysOn,
+    speed: 0x20,
+    color: LedColor::Purple,
+    cycles: 0x0,
+};
+static EFFECT_SUCCESS: LedEffect = LedEffect {
+    mode: LedMode::Breathing,
+    speed: 0x20,
+    color: LedColor::Blue,
+    cycles: 0x3,
+};
+static EFFECT_FAIL: LedEffect = LedEffect {
+    mode: LedMode::Flashing,
+    speed: 0x20,
+    color: LedColor::Red,
+    cycles: 0x3,
+};
+
 #[embassy_executor::task]
 pub async fn fingerprint_manager_task(mut sensor: MySensor) {
-    async fn led(sensor: &mut MySensor, color: LedColor) -> Result<(), FingerError> {
-        sensor
-            .control_led(LedMode::AlwaysOn, 0x20, color, 0x3)
-            .await
-    }
     async fn finger_on_sensor(expected_state: bool) {
         let mut receiver = FINGERPRINT_IRQ_STATUS.receiver().unwrap();
         Timer::after_millis(1000).await;
@@ -47,8 +62,9 @@ pub async fn fingerprint_manager_task(mut sensor: MySensor) {
         let cmd = FINGERPRINT_CHANNEL.receive().await;
         match cmd.cmd {
             SensorCommand::ValidateAccess => {
+                info!("Validating access...");
                 let result: Result<_, FingerError> = async {
-                    led(&mut sensor, LedColor::Purple).await?;
+                    sensor.led(&EFFECT_IN_PROGRESS).await?;
                     sensor.generate_image().await?;
                     sensor.image_to_template(1).await?;
                     sensor.search_database(1, 0, 200).await?;
@@ -56,35 +72,19 @@ pub async fn fingerprint_manager_task(mut sensor: MySensor) {
                 }
                 .await;
                 if result.is_ok() {
-                    sensor
-                        .control_led(
-                            LedMode::Breathing,
-                            0xFF, // Speed: 0x20 is a nice, slow human-like breath. 0xFF is "turbo" speed.
-                            LedColor::Blue,
-                            0x3, // Cycles: 0xFF usually means "Infinite"
-                        )
-                        .await
-                        .ok();
+                    sensor.led_await(&EFFECT_SUCCESS).await.ok();
                 } else {
-                    sensor
-                        .control_led(
-                            LedMode::Breathing,
-                            0x20, // Speed: 0x20 is a nice, slow human-like breath. 0xFF is "turbo" speed.
-                            LedColor::Red,
-                            0x3, // Cycles: 0xFF usually means "Infinite"
-                        )
-                        .await
-                        .ok();
+                    sensor.led_await(&EFFECT_FAIL).await.ok();
                 }
             }
             SensorCommand::EnrollNewUser => loop {
                 let result: Result<_, FingerError> = async {
                     for i in 1..=2u8 {
-                        led(&mut sensor, LedColor::Purple).await?;
+                        sensor.led(&EFFECT_IN_PROGRESS).await?;
                         finger_on_sensor(true).await;
                         sensor.generate_image().await?;
                         sensor.image_to_template(i).await?;
-                        led(&mut sensor, LedColor::Blue).await?;
+                        sensor.led(&EFFECT_SUCCESS).await?;
                         finger_on_sensor(false).await;
                     }
                     sensor.create_model().await?;
@@ -94,15 +94,7 @@ pub async fn fingerprint_manager_task(mut sensor: MySensor) {
                 }
                 .await;
                 if result.is_ok() {
-                    sensor
-                        .control_led(
-                            LedMode::Flashing,
-                            0x20, // Speed: 0x20 is a nice, slow human-like breath. 0xFF is "turbo" speed.
-                            LedColor::Blue,
-                            0x3, // Cycles: 0xFF usually means "Infinite"
-                        )
-                        .await
-                        .ok();
+                    sensor.led_await(&EFFECT_SUCCESS).await.ok();
                     finger_on_sensor(false).await;
                     break;
                 }

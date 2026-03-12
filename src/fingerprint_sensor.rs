@@ -1,4 +1,5 @@
 use embassy_stm32::usart::{BasicInstance, RxDma, TxDma, Uart};
+use embassy_time::Timer;
 use num_enum::TryFromPrimitive;
 
 /// Standard start code for all R503 packets (High byte: 0xEF, Low byte: 0x01)
@@ -125,6 +126,7 @@ pub enum FingerError {
 }
 
 #[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
 pub enum LedMode {
     Breathing = 0x01,
     Flashing = 0x02,
@@ -135,10 +137,19 @@ pub enum LedMode {
 }
 
 #[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
 pub enum LedColor {
     Red = 0x01,
     Blue = 0x02,
     Purple = 0x03,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LedEffect {
+    pub mode: LedMode,
+    pub speed: u8,
+    pub color: LedColor,
+    pub cycles: u8,
 }
 
 /// Implementation to allow embassy's UART error to be automatically
@@ -189,8 +200,8 @@ pub struct FingerprintSensor<'a, T: BasicInstance, TXDMA, RXDMA> {
 impl<'a, T, TXDMA, RXDMA> FingerprintSensor<'a, T, TXDMA, RXDMA>
 where
     T: BasicInstance,
-    TXDMA: TxDma<T>, // This satisfies the bound for .write()
-    RXDMA: RxDma<T>, // This satisfies the bound for .read()
+    TXDMA: TxDma<T>,
+    RXDMA: RxDma<T>,
 {
     pub fn new(uart: Uart<'a, T, TXDMA, RXDMA>, address: [u8; 4], password: [u8; 4]) -> Self {
         Self {
@@ -200,25 +211,24 @@ where
         }
     }
 
-    pub async fn led_breathing_infinite(&mut self, color: LedColor) -> Result<(), FingerError> {
-        self.control_led(LedMode::Breathing, 0xFF, color, 0x00)
-            .await
+    pub async fn led_await(&mut self, effect: &LedEffect) -> Result<(), FingerError> {
+        let result = self.led(effect).await;
+        if effect.cycles > 0 && result.is_ok() {
+            let wait_ms = (effect.speed as u32 * effect.cycles as u32 * 32) + 100;
+            Timer::after_millis(wait_ms as u64).await;
+        }
+        result
     }
 
-    pub async fn led_off(&mut self) -> Result<(), FingerError> {
-        self.control_led(LedMode::AlwaysOff, 0, LedColor::Red, 0)
-            .await
-    }
-
-    pub async fn control_led(
-        &mut self,
-        mode: LedMode,
-        speed: u8,
-        color: LedColor,
-        cycles: u8,
-    ) -> Result<(), FingerError> {
+    pub async fn led(&mut self, effect: &LedEffect) -> Result<(), FingerError> {
         // Data = Instruction (0x35) + Mode + Speed + Color + Cycles
-        let payload = [0x35, mode as u8, speed, color as u8, cycles];
+        let payload = [
+            0x35,
+            effect.mode as u8,
+            effect.speed,
+            effect.color as u8,
+            effect.cycles,
+        ];
 
         let cmd = packet(PacketType::Command, &self.address, &payload);
         self.uart.write(&cmd).await?;
@@ -380,12 +390,6 @@ where
         start_page: u16,
         count: u16,
     ) -> Result<(u16, u16), FingerError> {
-        // Parameters:
-        // 1. Instruction: 0x04
-        // 2. Buffer ID: Which RAM buffer to compare (1 or 2)
-        // 3. Start Page: Where to begin searching (2 bytes)
-        // 4. Page Num: How many slots to search (2 bytes)
-
         let start_bytes = start_page.to_be_bytes();
         let count_bytes = count.to_be_bytes();
 

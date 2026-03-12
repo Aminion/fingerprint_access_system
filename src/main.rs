@@ -73,13 +73,13 @@ async fn main(spawner: Spawner) {
         fingerprint_sensor::FingerprintSensor::new(uart, SENSOR_ADRESS, SENSOR_PASSWORD);
     let _ = sensor.verify_password().await;
 
-    spawner.spawn(unlock_task()).unwrap();
-    spawner.spawn(add_new_finger_task(add_finger_pin)).unwrap();
     spawner
         .spawn(fingerprint_irq_task(fingerprint_irq_pin))
         .unwrap();
     spawner.spawn(fingerprint_manager_task(sensor)).unwrap();
-
+    spawner.spawn(add_new_finger_task(add_finger_pin)).unwrap();
+    spawner.spawn(unlock_task()).unwrap();
+    
     loop {
         Timer::after_secs(u32::MAX as u64).await;
     }

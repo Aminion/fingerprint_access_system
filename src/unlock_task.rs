@@ -1,5 +1,6 @@
 use core::u64;
 
+use defmt::info;
 use embassy_stm32 as _;
 use embassy_stm32 as _;
 
@@ -14,16 +15,20 @@ use crate::{
     fingerprint_task::{CommandEnvelope, SensorCommand, FINGERPRINT_CHANNEL},
 };
 
+static DONE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+
 #[embassy_executor::task]
 pub async fn unlock_task() {
-    static DONE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
     let mut receiver = FINGERPRINT_IRQ_STATUS.receiver().unwrap();
     loop {
         let _ = receiver.changed_and(|v| *v).await;
-        let _ = FINGERPRINT_CHANNEL.send(CommandEnvelope {
-            cmd: SensorCommand::ValidateAccess,
-            ending_signal: &DONE,
-        });
+        FINGERPRINT_CHANNEL
+            .send(CommandEnvelope {
+                cmd: SensorCommand::ValidateAccess,
+                ending_signal: &DONE,
+            })
+            .await;
+        Timer::after_ticks(100).await;
         DONE.wait().await;
     }
 }
