@@ -30,7 +30,7 @@ use unlock_task::unlock_task;
 use {defmt_rtt as _, panic_probe as _};
 pub type MySensor = fingerprint_sensor::FingerprintSensor<'static, USART1, DMA1_CH1, DMA1_CH2>;
 
-const SENSOR_ADRESS: [u8; 4] = [0xFF, 0xFF, 0xFF, 0xFF];
+const SENSOR_ADDRESS: [u8; 4] = [0xFF, 0xFF, 0xFF, 0xFF];
 const SENSOR_PASSWORD: [u8; 4] = [0x00, 0x00, 0x00, 0x00];
 
 bind_interrupts!(struct Irqs {
@@ -70,7 +70,7 @@ async fn main(spawner: Spawner) {
     .unwrap();
 
     let mut sensor =
-        fingerprint_sensor::FingerprintSensor::new(uart, SENSOR_ADRESS, SENSOR_PASSWORD);
+        fingerprint_sensor::FingerprintSensor::new(uart, SENSOR_ADDRESS, SENSOR_PASSWORD);
     let _ = sensor.verify_password().await;
 
     spawner
@@ -79,7 +79,7 @@ async fn main(spawner: Spawner) {
     spawner.spawn(fingerprint_manager_task(sensor)).unwrap();
     spawner.spawn(add_new_finger_task(add_finger_pin)).unwrap();
     spawner.spawn(unlock_task()).unwrap();
-    
+
     loop {
         Timer::after_secs(u32::MAX as u64).await;
     }
