@@ -1,8 +1,4 @@
-use core::{fmt, iter::Sum, ops::Add};
-use embassy_stm32::{
-    pac::{bdma::Ch, i2c::vals::Headr},
-    usart::{BasicInstance, RxDma, TxDma, Uart, UartRx, UartTx},
-};
+use embassy_stm32::usart::{BasicInstance, RxDma, TxDma, Uart};
 use num_enum::TryFromPrimitive;
 
 /// Standard start code for all R503 packets (High byte: 0xEF, Low byte: 0x01)
@@ -205,11 +201,13 @@ where
     }
 
     pub async fn led_breathing_infinite(&mut self, color: LedColor) -> Result<(), FingerError> {
-        self.control_led(LedMode::Breathing, 0xFF, color, 0x00).await
+        self.control_led(LedMode::Breathing, 0xFF, color, 0x00)
+            .await
     }
 
     pub async fn led_off(&mut self) -> Result<(), FingerError> {
-        self.control_led(LedMode::AlwaysOff, 0, LedColor::Red, 0).await
+        self.control_led(LedMode::AlwaysOff, 0, LedColor::Red, 0)
+            .await
     }
 
     pub async fn control_led(
