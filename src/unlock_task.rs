@@ -20,7 +20,7 @@ static DONE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 pub async fn unlock_task() {
     let mut receiver = FINGERPRINT_IRQ_STATUS.receiver().unwrap();
     loop {
-        let _ = receiver.changed_and(|v| *v).await;
+        receiver.changed_and(|v| *v).await;
         FINGERPRINT_CHANNEL
             .send(CommandEnvelope {
                 cmd: SensorCommand::ValidateAccess,

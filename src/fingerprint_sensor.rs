@@ -160,20 +160,6 @@ impl From<embassy_stm32::usart::Error> for FingerError {
     }
 }
 
-// Standard formatting (used by {} and panic)
-impl core::fmt::Display for FingerError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Uart(e) => write!(f, "UART Hardware Error: {:?}", e),
-            Self::Protocol(m) => write!(f, "Protocol Error: {}", m),
-            Self::Sensor(c) => write!(f, "Sensor Error: {:?}", c),
-            Self::UnexpectedPacket(p) => write!(f, "Unexpected Packet Type: {:?}", p),
-            Self::NoFinger => write!(f, "No Finger Detected"),
-            Self::NoMatch => write!(f, "No Match Found"),
-        }
-    }
-}
-
 /// Optional: If you use defmt for logging, this helps print the errors
 #[cfg(feature = "defmt")]
 impl defmt::Format for FingerError {
