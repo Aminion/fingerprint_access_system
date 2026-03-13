@@ -1,3 +1,4 @@
+use defmt::{info, warn};
 use embassy_stm32::usart::{BasicInstance, RxDma, TxDma, Uart};
 use embassy_time::Timer;
 use num_enum::TryFromPrimitive;
@@ -152,6 +153,14 @@ pub struct LedEffect {
     pub cycles: u8,
 }
 
+pub struct Response<const N: usize> {
+    pub address: [u8; 4],
+    pub packet_type: PacketType,
+    pub length: u16,
+    pub data: [u8; N],
+    pub checksum: u16,
+}
+
 /// Implementation to allow embassy's UART error to be automatically
 /// converted into FingerError when using the '?' operator.
 impl From<embassy_stm32::usart::Error> for FingerError {
@@ -197,6 +206,57 @@ where
         }
     }
 
+    async fn receive_packet<const N: usize>(&mut self) -> Result<Response<N>, FingerError> {
+        let mut header = [0u8; 9];
+        self.uart
+            .read(&mut header)
+            .await
+            .map_err(|e| FingerError::Uart(e))?;
+
+        if u16::from_be_bytes([header[0], header[1]]) != START_CODE {
+            return Err(FingerError::Protocol("Invalid Start Code"));
+        }
+
+        let address = [header[2], header[3], header[4], header[5]];
+        let packet_type = PacketType::try_from(header[6])
+            .map_err(|_| FingerError::Protocol("Invalid Packet Type"))?;
+
+        let length_field = u16::from_be_bytes([header[7], header[8]]) as usize;
+        let mut body = [0u8; 128];
+        if length_field > body.len() {
+            return Err(FingerError::NoFinger);
+        }
+        self.uart
+            .read(&mut body[..length_field])
+            .await
+            .map_err(|_| FingerError::NoFinger)?;
+
+        let checksum = u16::from_be_bytes([body[length_field - 2], body[length_field - 1]]);
+        let mut data = [0u8; N];
+        //in case if we got error instead of answer
+        let data_to_copy = (length_field - 2).min(N);
+        data.copy_from_slice(&body[..data_to_copy]);
+
+        Ok(Response {
+            address: address,
+            packet_type,
+            length: length_field as u16,
+            data,
+            checksum,
+        })
+    }
+
+    async fn ack_packet(response: &Response<1>) -> Result<ConfirmationCode, FingerError> {
+        if response.packet_type != PacketType::Acknowledgement {
+            return Err(FingerError::UnexpectedPacket(response.packet_type));
+        }
+        let code: ConfirmationCode = response.data[0]
+            .try_into()
+            .map_err(|_| FingerError::Protocol("Unknown Confirmation Code"))?;
+
+        Ok(code)
+    }
+
     pub async fn led_await(&mut self, effect: &LedEffect) -> Result<(), FingerError> {
         let result = self.led(effect).await;
         if effect.cycles > 0 && result.is_ok() {
@@ -207,7 +267,6 @@ where
     }
 
     pub async fn led(&mut self, effect: &LedEffect) -> Result<(), FingerError> {
-        // Data = Instruction (0x35) + Mode + Speed + Color + Cycles
         let payload = [
             0x35,
             effect.mode as u8,
@@ -222,48 +281,28 @@ where
         let mut rx_buf = [0u8; 12];
         self.uart.read(&mut rx_buf).await?;
 
-        let (_, _, res_payload, _) = try_parse_packet(&rx_buf)?;
+        let pkt = self.receive_packet::<1>().await?;
+        let ack_code = Self::ack_packet(&pkt).await?;
 
-        // Check confirmation code at res_payload[0]
-        if res_payload[0] == 0x00 {
+        if ack_code == ConfirmationCode::Ok {
             Ok(())
         } else {
-            Err(FingerError::Sensor(res_payload[0].try_into().unwrap()))
+            return Err(FingerError::Sensor(ack_code));
         }
     }
     pub async fn verify_password(&mut self) -> Result<(), FingerError> {
         let cmd = Self::create_verify_packet(&self.address, &self.password);
-
         self.uart.write(&cmd).await?;
-
-        // 3. Read the 12-byte response packet
-        let mut rx_buf = [0u8; 12];
-        self.uart.read(&mut rx_buf).await?;
-
-        let (packet_type, _, payload, _) = try_parse_packet(&rx_buf)?;
-
-        if packet_type != PacketType::Acknowledgement {
-            return Err(FingerError::UnexpectedPacket(packet_type));
-        }
-
-        // 6. Check the Confirmation Code (Byte index 9)
-        let code: ConfirmationCode = payload[0]
-            .try_into()
-            .map_err(|_| FingerError::Protocol("Unknown Confirmation Code"))?;
-        match code {
-            ConfirmationCode::Ok => {
-                defmt::info!("Password verified. Sensor unlocked.");
-                Ok(())
-            }
-            _ => {
-                defmt::error!("Password verification failed: {:?}", code);
-                Err(FingerError::Sensor(code))
-            }
+        let response = self.receive_packet::<1>().await?;
+        let ack_code = Self::ack_packet(&response).await?;
+        if ack_code == ConfirmationCode::Ok {
+            Ok(())
+        } else {
+            return Err(FingerError::Sensor(ack_code));
         }
     }
 
     pub async fn generate_image(&mut self) -> Result<(), FingerError> {
-        // GenImg has no data, so we pass an empty array
         let cmd = packet(
             PacketType::Command,
             &self.address,
@@ -272,46 +311,31 @@ where
 
         self.uart.write(&cmd).await?;
 
-        let mut rx_buf = [0u8; 12];
-        self.uart.read(&mut rx_buf).await?; // Or your while loop
-
-        let (_, _, payload, _) = try_parse_packet(&rx_buf)?;
-
-        let code: ConfirmationCode = payload[0]
-            .try_into()
-            .map_err(|_| FingerError::Protocol("Unknown Confirmation Code"))?;
-
-        match code {
-            ConfirmationCode::Ok => Ok(()),
-            ConfirmationCode::NoFinger => Err(FingerError::NoFinger),
-            _ => Err(FingerError::Sensor(code)),
+        let response = self.receive_packet::<1>().await?;
+        let ack_code = Self::ack_packet(&response).await?;
+        if ack_code == ConfirmationCode::Ok {
+            Ok(())
+        } else {
+            return Err(FingerError::Sensor(ack_code));
         }
     }
 
     pub async fn image_to_template(&mut self, buffer_id: u8) -> Result<(), FingerError> {
-        // Data = Instruction (1 byte) + BufferID (1 byte)
         let payload = [Instruction::Img2Tz as u8, buffer_id];
         let cmd = packet(PacketType::Command, &self.address, &payload);
 
         self.uart.write(&cmd).await?;
 
-        let mut rx_buf = [0u8; 12];
-        self.uart.read(&mut rx_buf).await?;
-
-        let (_, _, res_payload, _) = try_parse_packet(&rx_buf)?;
-
-        let code: ConfirmationCode = res_payload[0]
-            .try_into()
-            .map_err(|_| FingerError::Protocol("Unknown Confirmation Code"))?;
-
-        match code {
-            ConfirmationCode::Ok => Ok(()),
-            _ => Err(FingerError::Sensor(code)),
+        let response = self.receive_packet::<1>().await?;
+        let ack_code = Self::ack_packet(&response).await?;
+        if ack_code == ConfirmationCode::Ok {
+            Ok(())
+        } else {
+            return Err(FingerError::Sensor(ack_code));
         }
     }
 
     pub async fn store_template(&mut self, buffer_id: u8, slot: u16) -> Result<(), FingerError> {
-        // Data = Instruction (1 byte) + BufferID (1 byte) + PageID (2 bytes)
         let slot_bytes = slot.to_be_bytes();
         let payload = [
             Instruction::Store as u8,
@@ -323,43 +347,27 @@ where
         let cmd = packet(PacketType::Command, &self.address, &payload);
         self.uart.write(&cmd).await?;
 
-        let mut rx_buf = [0u8; 12];
-        self.uart.read(&mut rx_buf).await?;
-
-        let (_, _, res_payload, _) = try_parse_packet(&rx_buf)?;
-
-        let code: ConfirmationCode = res_payload[0]
-            .try_into()
-            .map_err(|_| FingerError::Protocol("Unknown Confirmation Code"))?;
-
-        match code {
-            ConfirmationCode::Ok => {
-                defmt::info!("Template stored successfully in slot {}", slot);
-                Ok(())
-            }
-            _ => Err(FingerError::Sensor(code)),
+        let response = self.receive_packet::<1>().await?;
+        let ack_code = Self::ack_packet(&response).await?;
+        if ack_code == ConfirmationCode::Ok {
+            Ok(())
+        } else {
+            return Err(FingerError::Sensor(ack_code));
         }
     }
 
     pub async fn create_model(&mut self) -> Result<(), FingerError> {
-        // Instruction 0x05: Combines Buffer 1 and Buffer 2
-        // result is stored back in BOTH Buffer 1 and 2 as a "Model"
         let payload = [0x05];
         let cmd = packet(PacketType::Command, &self.address, &payload);
 
         self.uart.write(&cmd).await?;
 
-        let mut rx_buf = [0u8; 12];
-        self.uart.read(&mut rx_buf).await?;
-
-        let (_, _, res_payload, _) = try_parse_packet(&rx_buf)?;
-        let code: ConfirmationCode = res_payload[0]
-            .try_into()
-            .map_err(|_| FingerError::Protocol("Unknown Code"))?;
-
-        match code {
-            ConfirmationCode::Ok => Ok(()),
-            _ => Err(FingerError::Sensor(code)),
+        let response = self.receive_packet::<1>().await?;
+        let ack_code = Self::ack_packet(&response).await?;
+        if ack_code == ConfirmationCode::Ok {
+            Ok(())
+        } else {
+            return Err(FingerError::Sensor(ack_code));
         }
     }
 
@@ -391,87 +399,35 @@ where
         let cmd = packet(PacketType::Command, &self.address, &payload);
         self.uart.write(&cmd).await?;
 
-        // Search response is 16 bytes:
-        // [Header(2), Addr(4), PID(1), Len(2), Code(1), PageID(2), Score(2), Checksum(2)]
         let mut rx_buf = [0u8; 16];
         self.uart.read(&mut rx_buf).await?;
 
-        let (_, _, res_payload, _) = try_parse_packet(&rx_buf)?;
-
-        let code: ConfirmationCode = res_payload[0]
-            .try_into()
-            .map_err(|_| FingerError::Protocol("Unknown Confirmation Code"))?;
-
-        match code {
+        let response = self.receive_packet::<1>().await?;
+        let ack_code = Self::ack_packet(&response).await?;
+        match ack_code {
             ConfirmationCode::Ok => {
-                // Page ID is at payload[1..3]
-                let page_id = u16::from_be_bytes([res_payload[1], res_payload[2]]);
-                // Match Score is at payload[3..5]
-                let score = u16::from_be_bytes([res_payload[3], res_payload[4]]);
+                let page_id = u16::from_be_bytes([response.data[1], response.data[2]]);
+                let score = u16::from_be_bytes([response.data[3], response.data[4]]);
 
-                defmt::info!("Match found! Slot: {}, Score: {}", page_id, score);
+                info!("Match found! Slot: {}, Score: {}", page_id, score);
                 Ok((page_id, score))
             }
             ConfirmationCode::NoFinger => {
-                defmt::warn!("No match found in the specified database range.");
+                warn!("No match found in the specified database range.");
                 Err(FingerError::NoMatch)
             }
-            _ => Err(FingerError::Sensor(code)),
+            _ => Err(FingerError::Sensor(ack_code)),
         }
     }
 }
 
-pub fn try_parse_packet(data: &[u8]) -> Result<(PacketType, u16, &[u8], u16), FingerError> {
-    // 1. Check Header (Indices 0, 1)
-    let header = data
-        .get(0..2)
-        .map(|b| u16::from_be_bytes([b[0], b[1]]))
-        .ok_or(FingerError::Protocol("Missing Header"))?;
-
-    if header != START_CODE {
-        return Err(FingerError::Protocol("Invalid Start Code"));
-    }
-
-    // 2. Parse Packet Type (Index 6)
-    let packet_type = data
-        .get(6)
-        .copied()
-        .ok_or(FingerError::Protocol("Missing Packet Type"))
-        .and_then(|b| {
-            PacketType::try_from(b).map_err(|_| FingerError::Protocol("Invalid Packet Type"))
-        })?;
-
-    // 3. Parse Length (Indices 7, 8) -> Should be 7..9
-    let len = data
-        .get(7..9)
-        .map(|b| u16::from_be_bytes([b[0], b[1]]))
-        .ok_or(FingerError::Protocol("Missing Length"))?;
-
-    // Math Check: Total packet size is 9 + len.
-    // Example: If len is 7, total packet is 16 bytes.
-    let total_len = 9 + len as usize;
-
-    // 4. Extract Payload (Starts at index 9, ends 2 bytes before the total end)
-    let payload_end = total_len - 2;
-    let payload = data
-        .get(9..payload_end)
-        .ok_or(FingerError::Protocol("Missing Payload"))?;
-
-    // 5. Extract Checksum (The last two bytes of the packet)
-    let checksum = data
-        .get(payload_end..total_len)
-        .map(|b| u16::from_be_bytes([b[0], b[1]]))
-        .ok_or(FingerError::Protocol("Missing Checksum"))?;
-
-    Ok((packet_type, len, payload, checksum))
-}
-
-pub fn packet<const N: usize>(
+fn packet<const N: usize>(
     packet_type: PacketType,
     address: &[u8; 4],
     data: &[u8; N],
 ) -> [u8; N + 11] {
     let mut pkt = [0u8; N + 11];
+
     let (len, sum) = checksum(packet_type, data);
 
     pkt[0] = START_CODE_H;
@@ -495,13 +451,13 @@ pub fn packet<const N: usize>(
     pkt
 }
 
-pub fn split_to_bytes(value: u16) -> (u8, u8) {
+fn split_to_bytes(value: u16) -> (u8, u8) {
     let high_byte = (value >> 8) as u8;
     let low_byte = (value & 0xFF) as u8;
     (high_byte, low_byte)
 }
 
-pub fn checksum(packet_type: PacketType, data: &[u8]) -> (u16, u16) {
+fn checksum(packet_type: PacketType, data: &[u8]) -> (u16, u16) {
     let len = (data.len() + 2) as u16;
     let (len_high_byte, len_low_byte) = split_to_bytes(len);
     let mut sum: u16 = 0;
