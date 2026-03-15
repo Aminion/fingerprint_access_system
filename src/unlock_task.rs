@@ -14,10 +14,10 @@ use crate::{
     fingerprint_task::{CommandEnvelope, SensorCommand, FINGERPRINT_CHANNEL},
 };
 
-static DONE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+static DONE: Signal<CriticalSectionRawMutex, bool> = Signal::new();
 
 #[embassy_executor::task]
-pub async fn unlock_task() {
+pub async fn unlock_task(mut pwm: SimplePwm<'static, TIM1>) {
     let mut receiver = FINGERPRINT_IRQ_STATUS.receiver().unwrap();
     loop {
         receiver.changed_and(|v| *v).await;
@@ -28,13 +28,15 @@ pub async fn unlock_task() {
             })
             .await;
         Timer::after_ticks(100).await;
-        DONE.wait().await;
+        if DONE.wait().await {
+            unlock(&mut pwm).await;
+        }
     }
 }
 
-async fn unlock(pwm: &mut SimplePwm<'static, TIM1>) {
+pub async fn unlock(pwm: &mut SimplePwm<'static, TIM1>) {
     const KICK_MS: u64 = 50;
-    const HOLD_MS: u64 = 3000;
+    const HOLD_MS: u64 = 2000;
     const HOLD_DUTY_DIVIDER: u16 = 3;
     const CHANNEL: embassy_stm32::timer::Channel = embassy_stm32::timer::Channel::Ch1;
 

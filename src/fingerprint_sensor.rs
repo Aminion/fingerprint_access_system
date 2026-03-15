@@ -1,4 +1,3 @@
-use defmt::{info, warn};
 use embassy_stm32::usart::{BasicInstance, RxDma, TxDma, Uart};
 use embassy_time::Timer;
 use num_enum::TryFromPrimitive;
@@ -169,23 +168,6 @@ impl From<embassy_stm32::usart::Error> for FingerError {
     }
 }
 
-/// Optional: If you use defmt for logging, this helps print the errors
-#[cfg(feature = "defmt")]
-impl defmt::Format for FingerError {
-    fn format(&self, fmt: defmt::Formatter) {
-        match self {
-            FingerError::Uart(_) => defmt::write!(fmt, "FingerError::Uart"),
-            FingerError::Protocol(msg) => defmt::write!(fmt, "FingerError::Protocol({})", msg),
-            FingerError::Sensor(code) => defmt::write!(fmt, "FingerError::Sensor({:?})", code),
-            FingerError::UnexpectedPacket(p) => {
-                defmt::write!(fmt, "FingerError::UnexpectedPacket({:?})", p)
-            }
-            FingerError::NoFinger => defmt::write!(fmt, "FingerError::NoFinger"),
-            FingerError::NoMatch => defmt::write!(fmt, "FingerError::NoMatch"),
-        }
-    }
-}
-
 pub struct FingerprintSensor<'a, T: BasicInstance, TXDMA, RXDMA> {
     uart: Uart<'a, T, TXDMA, RXDMA>,
     address: [u8; 4],
@@ -246,7 +228,9 @@ where
         })
     }
 
-    async fn ack_packet(response: &Response<1>) -> Result<ConfirmationCode, FingerError> {
+    async fn ack_packet<const N: usize>(
+        response: &Response<N>,
+    ) -> Result<ConfirmationCode, FingerError> {
         if response.packet_type != PacketType::Acknowledgement {
             return Err(FingerError::UnexpectedPacket(response.packet_type));
         }
@@ -277,9 +261,6 @@ where
 
         let cmd = packet(PacketType::Command, &self.address, &payload);
         self.uart.write(&cmd).await?;
-
-        let mut rx_buf = [0u8; 12];
-        self.uart.read(&mut rx_buf).await?;
 
         let pkt = self.receive_packet::<1>().await?;
         let ack_code = Self::ack_packet(&pkt).await?;
@@ -399,21 +380,15 @@ where
         let cmd = packet(PacketType::Command, &self.address, &payload);
         self.uart.write(&cmd).await?;
 
-        let mut rx_buf = [0u8; 16];
-        self.uart.read(&mut rx_buf).await?;
-
-        let response = self.receive_packet::<1>().await?;
+        let response = self.receive_packet::<5>().await?;
         let ack_code = Self::ack_packet(&response).await?;
         match ack_code {
             ConfirmationCode::Ok => {
                 let page_id = u16::from_be_bytes([response.data[1], response.data[2]]);
                 let score = u16::from_be_bytes([response.data[3], response.data[4]]);
-
-                info!("Match found! Slot: {}, Score: {}", page_id, score);
                 Ok((page_id, score))
             }
             ConfirmationCode::NoFinger => {
-                warn!("No match found in the specified database range.");
                 Err(FingerError::NoMatch)
             }
             _ => Err(FingerError::Sensor(ack_code)),

@@ -9,6 +9,7 @@ use embassy_stm32 as _;
 use embassy_stm32 as _;
 use embassy_stm32::bind_interrupts;
 use embassy_stm32::exti::ExtiInput;
+use embassy_stm32::gpio::low_level::Pin;
 use embassy_stm32::gpio::{Input, OutputType, Pull};
 use embassy_stm32::peripherals::{DMA1_CH1, DMA1_CH2, USART1};
 use embassy_stm32::time::hz;
@@ -18,6 +19,7 @@ use embassy_time::Timer;
 
 use crate::fingerprint_irq_task::FINGERPRINT_IRQ_STATUS;
 use crate::fingerprint_task::add_new_finger_task;
+use crate::unlock_task::unlock;
 mod fingerprint_irq_task;
 mod fingerprint_sensor;
 mod fingerprint_task;
@@ -39,23 +41,23 @@ bind_interrupts!(struct Irqs {
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    FINGERPRINT_IRQ_STATUS.sender().send(false);
     let p = embassy_stm32::init(Default::default());
+    Timer::after_millis(200).await;
+    FINGERPRINT_IRQ_STATUS.sender().send(false);
     let button_pin = Input::new(p.PB2, Pull::Up);
     let fingerprint_irq_pin = ExtiInput::new(button_pin, p.EXTI2);
-    let button_pin = Input::new(p.PB8, Pull::Up);
-    let add_finger_pin = ExtiInput::new(button_pin, p.EXTI8);
-
+    //let button_pin = Input::new(p.PB8, Pull::Up);
+    //let add_finger_pin = ExtiInput::new(button_pin, p.EXTI8);
     let pwm = SimplePwm::new(
         p.TIM1,
-        Some(PwmPin::new_ch1(p.PA8, OutputType::PushPull)),
+        Some(PwmPin::new_ch1(p.PA8, OutputType::PushPull)), // PA8 is Channel 1
         None,
         None,
         None,
-        hz(10000),
+        hz(1000),
         Default::default(),
     );
-
+    //unlock(&mut ).await;
     let mut uart_config = embassy_stm32::usart::Config::default();
     uart_config.baudrate = 57_600;
     let uart = Uart::new(
@@ -77,8 +79,8 @@ async fn main(spawner: Spawner) {
         .spawn(fingerprint_irq_task(fingerprint_irq_pin))
         .unwrap();
     spawner.spawn(fingerprint_manager_task(sensor)).unwrap();
-    spawner.spawn(add_new_finger_task(add_finger_pin)).unwrap();
-    spawner.spawn(unlock_task()).unwrap();
+    //spawner.spawn(add_new_finger_task(add_finger_pin)).unwrap();
+    spawner.spawn(unlock_task(pwm)).unwrap();
 
     loop {
         Timer::after_secs(u32::MAX as u64).await;

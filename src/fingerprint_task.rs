@@ -1,8 +1,7 @@
-use defmt::info;
 use embassy_stm32 as _;
 use embassy_stm32 as _;
 use embassy_stm32::exti::ExtiInput;
-use embassy_stm32::peripherals::PB8;
+use embassy_stm32::peripherals::{PA8, PB8};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::signal::Signal;
@@ -24,7 +23,7 @@ pub enum SensorCommand {
 
 pub struct CommandEnvelope {
     pub cmd: SensorCommand,
-    pub ending_signal: &'static Signal<CriticalSectionRawMutex, ()>,
+    pub ending_signal: &'static Signal<CriticalSectionRawMutex, bool>,
 }
 
 static EFFECT_IN_PROGRESS: LedEffect = LedEffect {
@@ -62,7 +61,6 @@ pub async fn fingerprint_manager_task(mut sensor: MySensor) {
         let cmd = FINGERPRINT_CHANNEL.receive().await;
         match cmd.cmd {
             SensorCommand::ValidateAccess => {
-                info!("Validating access...");
                 let result: Result<_, FingerError> = async {
                     sensor.led(&EFFECT_IN_PROGRESS).await?;
                     sensor.generate_image().await?;
@@ -71,6 +69,7 @@ pub async fn fingerprint_manager_task(mut sensor: MySensor) {
                     Ok(())
                 }
                 .await;
+                cmd.ending_signal.signal(result.is_ok());
                 if result.is_ok() {
                     sensor.led_await(&EFFECT_SUCCESS).await.ok();
                 } else {
@@ -93,6 +92,7 @@ pub async fn fingerprint_manager_task(mut sensor: MySensor) {
                     Ok(())
                 }
                 .await;
+                cmd.ending_signal.signal(result.is_ok());
                 if result.is_ok() {
                     sensor.led_await(&EFFECT_SUCCESS).await.ok();
                     finger_on_sensor(false).await;
@@ -100,13 +100,12 @@ pub async fn fingerprint_manager_task(mut sensor: MySensor) {
                 }
             },
         }
-        cmd.ending_signal.signal(());
     }
 }
 
 #[embassy_executor::task]
-pub async fn add_new_finger_task(mut pin: ExtiInput<'static, PB8>) {
-    static DONE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+pub async fn add_new_finger_task(mut pin: ExtiInput<'static, PA8>) {
+    static DONE: Signal<CriticalSectionRawMutex, bool> = Signal::new();
     loop {
         pin.wait_for_low().await;
 
