@@ -15,6 +15,7 @@ use embassy_stm32::time::{Hertz,khz};
 use embassy_stm32::timer::simple_pwm::{PwmPin, SimplePwm};
 use embassy_stm32::usart::{InterruptHandler, Uart};
 use embassy_time::Timer;
+use {defmt_rtt as _, panic_probe as _};
 
 use crate::fingerprint_irq_task::FINGERPRINT_IRQ_STATUS;
 use crate::fingerprint_task::add_new_finger_task;
@@ -28,8 +29,7 @@ use fingerprint_irq_task::fingerprint_irq_task;
 use fingerprint_task::fingerprint_manager_task;
 use unlock_task::unlock_task;
 
-use {defmt_rtt as _, panic_probe as _};
-pub type MySensor = fingerprint_sensor::FingerprintSensor<'static, USART1, DMA1_CH1, DMA1_CH2>;
+pub type FingerprintSensor = fingerprint_sensor::FingerprintSensor<'static, USART1, DMA1_CH1, DMA1_CH2>;
 
 const SENSOR_ADDRESS: [u8; 4] = [0xFF, 0xFF, 0xFF, 0xFF];
 const SENSOR_PASSWORD: [u8; 4] = [0x00, 0x00, 0x00, 0x00];
@@ -60,21 +60,21 @@ async fn main(spawner: Spawner) {
         Default::default(),
     );
 
-    let mut uart_config = embassy_stm32::usart::Config::default();
-    uart_config.baudrate = SENSOR_BAUDRATE;
-    let uart = Uart::new(
+    let mut fingerprint_uart_config = embassy_stm32::usart::Config::default();
+    fingerprint_uart_config.baudrate = SENSOR_BAUDRATE;
+    let fingerprint_uart = Uart::new(
         p.USART1,
         p.PA10,
         p.PA9,
         Irqs,
         p.DMA1_CH1,
         p.DMA1_CH2,
-        uart_config,
+        fingerprint_uart_config,
     )
     .unwrap();
 
     let mut sensor =
-        fingerprint_sensor::FingerprintSensor::new(uart, SENSOR_ADDRESS, SENSOR_PASSWORD);
+        fingerprint_sensor::FingerprintSensor::new(fingerprint_uart, SENSOR_ADDRESS, SENSOR_PASSWORD);
     let _ = sensor.verify_password().await;
 
     spawner

@@ -9,7 +9,7 @@ use embassy_time::Timer;
 
 use crate::fingerprint_irq_task::FINGERPRINT_IRQ_STATUS;
 use crate::fingerprint_sensor::{FingerError, LedColor, LedEffect, LedMode};
-use crate::MySensor;
+use crate::FingerprintSensor;
 
 pub static FINGERPRINT_CHANNEL: Channel<CriticalSectionRawMutex, SensorCommand, 1> = Channel::new();
 
@@ -40,7 +40,7 @@ static EFFECT_FAIL: LedEffect = LedEffect {
 };
 
 #[embassy_executor::task]
-pub async fn fingerprint_manager_task(mut sensor: MySensor) {
+pub async fn fingerprint_manager_task(mut sensor: FingerprintSensor) {
     async fn finger_on_sensor(expected_state: bool) {
         let mut receiver = FINGERPRINT_IRQ_STATUS.receiver().unwrap();
         Timer::after_millis(1000).await;
