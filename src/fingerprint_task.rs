@@ -4,26 +4,20 @@ use embassy_stm32::exti::ExtiInput;
 use embassy_stm32::peripherals::{PA8, PB8};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
-use embassy_sync::signal::Signal;
+use embassy_sync::signal::{self, Signal};
 use embassy_time::Timer;
 
 use crate::fingerprint_irq_task::FINGERPRINT_IRQ_STATUS;
 use crate::fingerprint_sensor::{FingerError, LedColor, LedEffect, LedMode};
 use crate::MySensor;
 
-pub static FINGERPRINT_CHANNEL: Channel<CriticalSectionRawMutex, CommandEnvelope, 1> =
-    Channel::new();
+pub static FINGERPRINT_CHANNEL: Channel<CriticalSectionRawMutex, SensorCommand, 1> = Channel::new();
 
 #[derive(Clone, Copy)] // Commands should be small and easy to copy
 
 pub enum SensorCommand {
-    ValidateAccess,
-    EnrollNewUser,
-}
-
-pub struct CommandEnvelope {
-    pub cmd: SensorCommand,
-    pub ending_signal: &'static Signal<CriticalSectionRawMutex, bool>,
+    ValidateAccess(&'static Signal<CriticalSectionRawMutex, bool>),
+    EnrollNewUser(&'static Signal<CriticalSectionRawMutex, ()>),
 }
 
 static EFFECT_IN_PROGRESS: LedEffect = LedEffect {
@@ -59,8 +53,8 @@ pub async fn fingerprint_manager_task(mut sensor: MySensor) {
     }
     loop {
         let cmd = FINGERPRINT_CHANNEL.receive().await;
-        match cmd.cmd {
-            SensorCommand::ValidateAccess => {
+        match cmd {
+            SensorCommand::ValidateAccess(signal) => {
                 let result: Result<_, FingerError> = async {
                     sensor.led(&EFFECT_IN_PROGRESS).await?;
                     sensor.generate_image().await?;
@@ -69,14 +63,14 @@ pub async fn fingerprint_manager_task(mut sensor: MySensor) {
                     Ok(())
                 }
                 .await;
-                cmd.ending_signal.signal(result.is_ok());
+                signal.signal(result.is_ok());
                 if result.is_ok() {
                     sensor.led_await(&EFFECT_SUCCESS).await.ok();
                 } else {
                     sensor.led_await(&EFFECT_FAIL).await.ok();
                 }
             }
-            SensorCommand::EnrollNewUser => loop {
+            SensorCommand::EnrollNewUser(signal) => loop {
                 let result: Result<_, FingerError> = async {
                     for i in 1..=2u8 {
                         sensor.led(&EFFECT_IN_PROGRESS).await?;
@@ -92,7 +86,7 @@ pub async fn fingerprint_manager_task(mut sensor: MySensor) {
                     Ok(())
                 }
                 .await;
-                cmd.ending_signal.signal(result.is_ok());
+                signal.signal(());
                 if result.is_ok() {
                     sensor.led_await(&EFFECT_SUCCESS).await.ok();
                     finger_on_sensor(false).await;
@@ -105,15 +99,12 @@ pub async fn fingerprint_manager_task(mut sensor: MySensor) {
 
 #[embassy_executor::task]
 pub async fn add_new_finger_task(mut pin: ExtiInput<'static, PA8>) {
-    static DONE: Signal<CriticalSectionRawMutex, bool> = Signal::new();
+    static DONE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
     loop {
         pin.wait_for_low().await;
 
         FINGERPRINT_CHANNEL
-            .send(CommandEnvelope {
-                cmd: SensorCommand::EnrollNewUser,
-                ending_signal: &DONE,
-            })
+            .send(SensorCommand::EnrollNewUser(&DONE))
             .await;
         DONE.wait().await;
     }

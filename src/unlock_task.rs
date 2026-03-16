@@ -11,7 +11,7 @@ use embassy_time::Timer;
 
 use crate::{
     fingerprint_irq_task::FINGERPRINT_IRQ_STATUS,
-    fingerprint_task::{CommandEnvelope, SensorCommand, FINGERPRINT_CHANNEL},
+    fingerprint_task::{SensorCommand, FINGERPRINT_CHANNEL},
 };
 
 static DONE: Signal<CriticalSectionRawMutex, bool> = Signal::new();
@@ -22,10 +22,7 @@ pub async fn unlock_task(mut pwm: SimplePwm<'static, TIM1>) {
     loop {
         receiver.changed_and(|v| *v).await;
         FINGERPRINT_CHANNEL
-            .send(CommandEnvelope {
-                cmd: SensorCommand::ValidateAccess,
-                ending_signal: &DONE,
-            })
+            .send(SensorCommand::ValidateAccess(&DONE))
             .await;
         Timer::after_ticks(100).await;
         if DONE.wait().await {

@@ -9,10 +9,9 @@ use embassy_stm32 as _;
 use embassy_stm32 as _;
 use embassy_stm32::bind_interrupts;
 use embassy_stm32::exti::ExtiInput;
-use embassy_stm32::gpio::low_level::Pin;
 use embassy_stm32::gpio::{Input, OutputType, Pull};
 use embassy_stm32::peripherals::{DMA1_CH1, DMA1_CH2, USART1};
-use embassy_stm32::time::hz;
+use embassy_stm32::time::{Hertz,khz};
 use embassy_stm32::timer::simple_pwm::{PwmPin, SimplePwm};
 use embassy_stm32::usart::{InterruptHandler, Uart};
 use embassy_time::Timer;
@@ -34,6 +33,9 @@ pub type MySensor = fingerprint_sensor::FingerprintSensor<'static, USART1, DMA1_
 
 const SENSOR_ADDRESS: [u8; 4] = [0xFF, 0xFF, 0xFF, 0xFF];
 const SENSOR_PASSWORD: [u8; 4] = [0x00, 0x00, 0x00, 0x00];
+const SENSOR_BAUDRATE: u32 = 57600;
+const SOLENOID_FREQUENCY: Hertz = khz(10);
+
 
 bind_interrupts!(struct Irqs {
     USART1 => InterruptHandler<embassy_stm32::peripherals::USART1>;
@@ -48,18 +50,18 @@ async fn main(spawner: Spawner) {
     let fingerprint_irq_pin = ExtiInput::new(button_pin, p.EXTI2);
     //let button_pin = Input::new(p.PB8, Pull::Up);
     //let add_finger_pin = ExtiInput::new(button_pin, p.EXTI8);
-    let pwm = SimplePwm::new(
+    let solenoid_pin = SimplePwm::new(
         p.TIM1,
         Some(PwmPin::new_ch1(p.PA8, OutputType::PushPull)), // PA8 is Channel 1
         None,
         None,
         None,
-        hz(1000),
+        SOLENOID_FREQUENCY,
         Default::default(),
     );
-    //unlock(&mut ).await;
+
     let mut uart_config = embassy_stm32::usart::Config::default();
-    uart_config.baudrate = 57_600;
+    uart_config.baudrate = SENSOR_BAUDRATE;
     let uart = Uart::new(
         p.USART1,
         p.PA10,
@@ -80,7 +82,7 @@ async fn main(spawner: Spawner) {
         .unwrap();
     spawner.spawn(fingerprint_manager_task(sensor)).unwrap();
     //spawner.spawn(add_new_finger_task(add_finger_pin)).unwrap();
-    spawner.spawn(unlock_task(pwm)).unwrap();
+    spawner.spawn(unlock_task(solenoid_pin)).unwrap();
 
     loop {
         Timer::after_secs(u32::MAX as u64).await;
