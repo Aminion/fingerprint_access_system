@@ -5,6 +5,7 @@
 
 use core::u64;
 use embassy_executor::Spawner;
+use embassy_stm32::adc::Adc;
 use embassy_stm32 as _;
 use embassy_stm32 as _;
 use embassy_stm32::bind_interrupts;
@@ -24,6 +25,8 @@ mod fingerprint_irq_task;
 mod fingerprint_sensor;
 mod fingerprint_task;
 mod unlock_task;
+mod battery_monitoring_task;
+
 
 use fingerprint_irq_task::fingerprint_irq_task;
 use fingerprint_task::fingerprint_manager_task;
@@ -83,6 +86,12 @@ async fn main(spawner: Spawner) {
     spawner.spawn(fingerprint_manager_task(sensor)).unwrap();
     //spawner.spawn(add_new_finger_task(add_finger_pin)).unwrap();
     spawner.spawn(unlock_task(solenoid_pin)).unwrap();
+
+    let mut delay = embassy_time::Delay;
+
+    // 2. Initialize the ADC with both arguments
+    let mut adc = Adc::new(p.ADC1, &mut delay);
+    spawner.spawn(battery_monitoring_task::battery_monitor_task(adc, p.PA5, p.PA4)).unwrap();
 
     loop {
         Timer::after_secs(u32::MAX as u64).await;
