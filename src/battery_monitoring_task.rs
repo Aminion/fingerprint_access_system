@@ -29,8 +29,12 @@ pub async fn battery_monitor_task(
     adc.set_sample_time(SampleTime::Cycles160_5);
     loop {
         reference_enable_pin.set_high();
+        
         let ref_sample = adc.read(&mut reference_pin);
         let bat_sample = adc.read(&mut measure_pin);
+        
+        reference_enable_pin.set_low();
+        
         let discrepancy = REF_LEVEL - ref_sample;
         let bat_sample_corrected = bat_sample + discrepancy;
         if bat_sample_corrected < V_CRITICAL_LEVEL {
@@ -40,7 +44,6 @@ pub async fn battery_monitor_task(
         } else if bat_sample_corrected < V_FULL_LEVEL {
             info!("FULL BATTERY VOLTAGE")
         };
-        reference_enable_pin.set_low();
         Timer::after_secs(DELAY).await;
     }
 }
