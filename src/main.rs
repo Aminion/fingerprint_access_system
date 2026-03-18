@@ -5,14 +5,14 @@
 
 use core::u64;
 use embassy_executor::Spawner;
+use embassy_stm32 as _;
+use embassy_stm32 as _;
 use embassy_stm32::adc::Adc;
-use embassy_stm32 as _;
-use embassy_stm32 as _;
 use embassy_stm32::bind_interrupts;
 use embassy_stm32::exti::ExtiInput;
-use embassy_stm32::gpio::{Input, OutputType, Pull};
+use embassy_stm32::gpio::{Input, Level, Output, OutputType, Pull, Speed};
 use embassy_stm32::peripherals::{DMA1_CH1, DMA1_CH2, USART1};
-use embassy_stm32::time::{Hertz,khz};
+use embassy_stm32::time::{khz, Hertz};
 use embassy_stm32::timer::simple_pwm::{PwmPin, SimplePwm};
 use embassy_stm32::usart::{InterruptHandler, Uart};
 use embassy_time::Timer;
@@ -21,24 +21,23 @@ use {defmt_rtt as _, panic_probe as _};
 use crate::fingerprint_irq_task::FINGERPRINT_IRQ_STATUS;
 use crate::fingerprint_task::add_new_finger_task;
 use crate::unlock_task::unlock;
+mod battery_monitoring_task;
 mod fingerprint_irq_task;
 mod fingerprint_sensor;
 mod fingerprint_task;
 mod unlock_task;
-mod battery_monitoring_task;
-
 
 use fingerprint_irq_task::fingerprint_irq_task;
 use fingerprint_task::fingerprint_manager_task;
 use unlock_task::unlock_task;
 
-pub type FingerprintSensor = fingerprint_sensor::FingerprintSensor<'static, USART1, DMA1_CH1, DMA1_CH2>;
+pub type FingerprintSensor =
+    fingerprint_sensor::FingerprintSensor<'static, USART1, DMA1_CH1, DMA1_CH2>;
 
 const SENSOR_ADDRESS: [u8; 4] = [0xFF, 0xFF, 0xFF, 0xFF];
 const SENSOR_PASSWORD: [u8; 4] = [0x00, 0x00, 0x00, 0x00];
 const SENSOR_BAUDRATE: u32 = 57600;
 const SOLENOID_FREQUENCY: Hertz = khz(10);
-
 
 bind_interrupts!(struct Irqs {
     USART1 => InterruptHandler<embassy_stm32::peripherals::USART1>;
@@ -76,8 +75,11 @@ async fn main(spawner: Spawner) {
     )
     .unwrap();
 
-    let mut sensor =
-        fingerprint_sensor::FingerprintSensor::new(fingerprint_uart, SENSOR_ADDRESS, SENSOR_PASSWORD);
+    let mut sensor = fingerprint_sensor::FingerprintSensor::new(
+        fingerprint_uart,
+        SENSOR_ADDRESS,
+        SENSOR_PASSWORD,
+    );
     let _ = sensor.verify_password().await;
 
     spawner
@@ -89,9 +91,16 @@ async fn main(spawner: Spawner) {
 
     let mut delay = embassy_time::Delay;
 
-    // 2. Initialize the ADC with both arguments
-    let mut adc = Adc::new(p.ADC1, &mut delay);
-    spawner.spawn(battery_monitoring_task::battery_monitor_task(adc, p.PA5, p.PA4)).unwrap();
+    let adc = Adc::new(p.ADC1, &mut delay);
+    let ref_enable_pin = Output::new(p.PB3, Level::Low, Speed::Low);
+    spawner
+        .spawn(battery_monitoring_task::battery_monitor_task(
+            adc,
+            p.PA5,
+            ref_enable_pin,
+            p.PA4,
+        ))
+        .unwrap();
 
     loop {
         Timer::after_secs(u32::MAX as u64).await;
