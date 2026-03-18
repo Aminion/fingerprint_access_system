@@ -22,11 +22,14 @@ use crate::fingerprint_irq_task::FINGERPRINT_IRQ_STATUS;
 use crate::fingerprint_task::add_new_finger_task;
 use crate::unlock_task::unlock;
 mod battery_monitoring_task;
+mod beeper_task;
 mod fingerprint_irq_task;
 mod fingerprint_sensor;
 mod fingerprint_task;
 mod unlock_task;
 
+use battery_monitoring_task::battery_monitor_task;
+use beeper_task::beeper_task;
 use fingerprint_irq_task::fingerprint_irq_task;
 use fingerprint_task::fingerprint_manager_task;
 use unlock_task::unlock_task;
@@ -82,24 +85,20 @@ async fn main(spawner: Spawner) {
     );
     let _ = sensor.verify_password().await;
 
+    let mut delay = embassy_time::Delay;
+    let adc = Adc::new(p.ADC1, &mut delay);
+    let ref_enable_pin = Output::new(p.PB3, Level::Low, Speed::Low);
+    let beeper_pin = Output::new(p.PB9, Level::Low, Speed::Low);
+
     spawner
         .spawn(fingerprint_irq_task(fingerprint_irq_pin))
         .unwrap();
     spawner.spawn(fingerprint_manager_task(sensor)).unwrap();
     //spawner.spawn(add_new_finger_task(add_finger_pin)).unwrap();
     spawner.spawn(unlock_task(solenoid_pin)).unwrap();
-
-    let mut delay = embassy_time::Delay;
-
-    let adc = Adc::new(p.ADC1, &mut delay);
-    let ref_enable_pin = Output::new(p.PB3, Level::Low, Speed::Low);
+    spawner.spawn(beeper_task(beeper_pin)).unwrap();
     spawner
-        .spawn(battery_monitoring_task::battery_monitor_task(
-            adc,
-            p.PA5,
-            ref_enable_pin,
-            p.PA4,
-        ))
+        .spawn(battery_monitor_task(adc, p.PA5, ref_enable_pin, p.PA4))
         .unwrap();
 
     loop {

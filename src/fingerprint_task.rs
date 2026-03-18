@@ -1,10 +1,10 @@
 use embassy_stm32 as _;
 use embassy_stm32 as _;
 use embassy_stm32::exti::ExtiInput;
-use embassy_stm32::peripherals::{PA8, PB8};
+use embassy_stm32::peripherals::PA8;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
-use embassy_sync::signal::{self, Signal};
+use embassy_sync::signal::Signal;
 use embassy_time::Timer;
 
 use crate::fingerprint_irq_task::FINGERPRINT_IRQ_STATUS;

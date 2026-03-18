@@ -1,8 +1,11 @@
-use defmt::info;
 use embassy_stm32::adc::{Adc, SampleTime};
 use embassy_stm32::gpio::Output;
 use embassy_stm32::peripherals::{ADC1, PA4, PA5, PB3};
-use embassy_time::Timer;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::signal::Signal;
+use embassy_time::{Duration, Timer};
+
+use crate::beeper_task::{BeeperCommand, BEEPER_CHANNEL};
 
 //NI-MH
 const ADC_RANGE: f64 = 4096.0;
@@ -12,12 +15,27 @@ const BAT_COUNT: f64 = 4.0;
 const V_FULL: f64 = BAT_COUNT * 1.35;
 const V_LOW: f64 = BAT_COUNT * 1.1;
 const V_CRITICAL: f64 = BAT_COUNT * 1.0;
-const V_FULL_LEVEL: u16 = ADC_RANGE as u16;
 const V_LOW_LEVEL: u16 = (V_LOW / V_FULL * ADC_RANGE) as u16;
 const V_CRITICAL_LEVEL: u16 = (V_CRITICAL / V_FULL * ADC_RANGE) as u16;
 const REF_LEVEL: u16 = (REF_V / ADC_MAX_V * ADC_RANGE) as u16;
 
-const DELAY: u64 = 3600; //1 hour
+static DONE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+
+const LOW_LEVEL_SIGNAL: BeeperCommand = BeeperCommand {
+    duration: embassy_time::Duration::from_millis(500),
+    delay: embassy_time::Duration::from_millis(0),
+    times: 1,
+    done: &DONE,
+};
+
+const CRITICAL_LEVEL_SIGNAL: BeeperCommand = BeeperCommand {
+    duration: embassy_time::Duration::from_millis(500),
+    delay: embassy_time::Duration::from_millis(100),
+    times: 3,
+    done: &DONE,
+};
+
+const DELAY: Duration = Duration::from_secs(3600); // 1 hour
 
 #[embassy_executor::task]
 pub async fn battery_monitor_task(
@@ -29,21 +47,19 @@ pub async fn battery_monitor_task(
     adc.set_sample_time(SampleTime::Cycles160_5);
     loop {
         reference_enable_pin.set_high();
-        
+
         let ref_sample = adc.read(&mut reference_pin);
         let bat_sample = adc.read(&mut measure_pin);
-        
+
         reference_enable_pin.set_low();
-        
+
         let discrepancy = REF_LEVEL - ref_sample;
         let bat_sample_corrected = bat_sample + discrepancy;
-        if bat_sample_corrected < V_CRITICAL_LEVEL {
-            info!("CRITICAL BATTERY VOLTAGE")
-        } else if bat_sample_corrected < V_LOW_LEVEL {
-            info!("LOW BATTERY VOLTAGE")
-        } else if bat_sample_corrected < V_FULL_LEVEL {
-            info!("FULL BATTERY VOLTAGE")
-        };
-        Timer::after_secs(DELAY).await;
+        if bat_sample_corrected <= V_CRITICAL_LEVEL {
+            BEEPER_CHANNEL.send(LOW_LEVEL_SIGNAL).await;
+        } else if bat_sample_corrected <= V_LOW_LEVEL {
+            BEEPER_CHANNEL.send(CRITICAL_LEVEL_SIGNAL).await;
+        }
+        Timer::after(DELAY).await;
     }
 }
