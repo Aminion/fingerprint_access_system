@@ -4,6 +4,7 @@
 #![allow(incomplete_features)]
 
 use core::u64;
+use defmt::println;
 use embassy_executor::Spawner;
 use embassy_stm32 as _;
 use embassy_stm32 as _;
@@ -42,19 +43,32 @@ const SENSOR_PASSWORD: [u8; 4] = [0x00, 0x00, 0x00, 0x00];
 const SENSOR_BAUDRATE: u32 = 57600;
 const SOLENOID_FREQUENCY: Hertz = khz(10);
 
-bind_interrupts!(struct Irqs {
-    USART1 => InterruptHandler<embassy_stm32::peripherals::USART1>;
-});
-
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_stm32::init(Default::default());
-    Timer::after_millis(200).await;
+    let mut button_pin1 = Output::new(p.PA3, Level::High, Speed::Low);
+
+    let sensor_setup = fingerprint_sensor::SensorSetup {
+        address: SENSOR_ADDRESS,
+        password: SENSOR_PASSWORD,
+        baudrate: SENSOR_BAUDRATE,
+        usart: p.USART1,
+        tx_pin: p.PB6,
+        rx_pin: p.PB7,
+        tx_dma: p.DMA1_CH1,
+        rx_dma: p.DMA1_CH2,
+        enable_pin: button_pin1,
+    };
+
+    let sensor = FingerprintSensor::new(sensor_setup).await;
+
     FINGERPRINT_IRQ_STATUS.sender().send(false);
-    let button_pin = Input::new(p.PB2, Pull::Up);
+    let button_pin = Input::new(p.PA2, Pull::Up);
     let fingerprint_irq_pin = ExtiInput::new(button_pin, p.EXTI2);
-    //let button_pin = Input::new(p.PB8, Pull::Up);
-    //let add_finger_pin = ExtiInput::new(button_pin, p.EXTI8);
+    spawner.spawn(fingerprint_manager_task(sensor)).unwrap();
+    spawner
+        .spawn(fingerprint_irq_task(fingerprint_irq_pin))
+        .unwrap();
     let solenoid_pin = SimplePwm::new(
         p.TIM1,
         Some(PwmPin::new_ch1(p.PA8, OutputType::PushPull)), // PA8 is Channel 1
@@ -65,43 +79,23 @@ async fn main(spawner: Spawner) {
         Default::default(),
     );
 
-    let mut fingerprint_uart_config = embassy_stm32::usart::Config::default();
-    fingerprint_uart_config.baudrate = SENSOR_BAUDRATE;
-    let fingerprint_uart = Uart::new(
-        p.USART1,
-        p.PA10,
-        p.PA9,
-        Irqs,
-        p.DMA1_CH1,
-        p.DMA1_CH2,
-        fingerprint_uart_config,
-    )
-    .unwrap();
+    spawner.spawn(unlock_task(solenoid_pin)).unwrap();
+    loop {
+        Timer::after_secs(u32::MAX as u64).await;
+    }
 
-    let mut sensor = fingerprint_sensor::FingerprintSensor::new(
-        fingerprint_uart,
-        SENSOR_ADDRESS,
-        SENSOR_PASSWORD,
-    );
-    let _ = sensor.verify_password().await;
+    //let button_pin = Input::new(p.PB8, Pull::Up);
+    //let add_finger_pin = ExtiInput::new(button_pin, p.EXTI8);
 
     let mut delay = embassy_time::Delay;
     let adc = Adc::new(p.ADC1, &mut delay);
     let ref_enable_pin = Output::new(p.PB3, Level::Low, Speed::Low);
     let beeper_pin = Output::new(p.PB9, Level::Low, Speed::Low);
 
-    spawner
-        .spawn(fingerprint_irq_task(fingerprint_irq_pin))
-        .unwrap();
-    spawner.spawn(fingerprint_manager_task(sensor)).unwrap();
     //spawner.spawn(add_new_finger_task(add_finger_pin)).unwrap();
-    spawner.spawn(unlock_task(solenoid_pin)).unwrap();
+
     spawner.spawn(beeper_task(beeper_pin)).unwrap();
     spawner
         .spawn(battery_monitor_task(adc, p.PA5, ref_enable_pin, p.PA4))
         .unwrap();
-
-    loop {
-        Timer::after_secs(u32::MAX as u64).await;
-    }
 }

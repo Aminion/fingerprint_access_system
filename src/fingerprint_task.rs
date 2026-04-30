@@ -1,3 +1,4 @@
+use defmt::println;
 use embassy_stm32 as _;
 use embassy_stm32 as _;
 use embassy_stm32::exti::ExtiInput;
@@ -57,6 +58,7 @@ pub async fn fingerprint_manager_task(mut sensor: FingerprintSensor) {
             SensorCommand::ValidateAccess(signal) => {
                 let result: Result<_, FingerError> = async {
                     sensor.led(&EFFECT_IN_PROGRESS).await?;
+                    println!("generating image");
                     sensor.generate_image().await?;
                     sensor.image_to_template(1).await?;
                     sensor.search_database(1, 0, 200).await?;

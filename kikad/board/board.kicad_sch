@@ -3458,6 +3458,16 @@
 		)
 		(uuid "3fa62016-847a-4088-aec9-84282cf2340b")
 	)
+	(label "SOLENOID_ENABLE"
+		(at 182.88 99.06 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left bottom)
+		)
+		(uuid "457c1c30-6682-4d99-a1c8-138938f6b06a")
+	)
 	(label "FINGER_RX"
 		(at 160.02 104.14 180)
 		(effects
@@ -3478,7 +3488,7 @@
 		)
 		(uuid "4feba18f-f9ff-4925-9994-6463d674ca1e")
 	)
-	(label "SOLENOID_ENABLE"
+	(label "BUZZER"
 		(at 182.88 96.52 0)
 		(effects
 			(font
@@ -3486,7 +3496,7 @@
 			)
 			(justify left bottom)
 		)
-		(uuid "8bcc5cd8-b8a4-45d8-a0bd-0dd4065eb6aa")
+		(uuid "6b55bfdf-c002-4ba6-9ddb-d2ecd12e487a")
 	)
 	(label "BAT_SENSE"
 		(at 182.88 106.68 0)
@@ -3597,16 +3607,6 @@
 			(justify right bottom)
 		)
 		(uuid "df79e5c1-d894-4e46-b7b9-f82f7b2a721f")
-	)
-	(label "BUZZER"
-		(at 182.88 99.06 0)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify left bottom)
-		)
-		(uuid "f5505749-108a-4f10-ae8f-7042e355336b")
 	)
 	(label "REFERENCE_ENABLE"
 		(at 182.88 101.6 0)
@@ -4406,7 +4406,7 @@
 				)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "Connector_PinSocket_2.54mm:PinSocket_1x10_P2.54mm_Vertical"
 			(at 177.8 99.06 0)
 			(effects
 				(font

@@ -32,9 +32,9 @@ pub async fn unlock_task(mut pwm: SimplePwm<'static, TIM1>) {
 }
 
 pub async fn unlock(pwm: &mut SimplePwm<'static, TIM1>) {
-    const KICK_MS: u64 = 50;
-    const HOLD_MS: u64 = 2000;
-    const HOLD_DUTY_DIVIDER: u16 = 3;
+    const KICK_MS: u64 = 100;
+    const HOLD_MS: u64 = 3000;
+    const HOLD_DUTY_DIVIDER: u16 = 2;
     const CHANNEL: embassy_stm32::timer::Channel = embassy_stm32::timer::Channel::Ch1;
 
     let max_duty = pwm.get_max_duty();

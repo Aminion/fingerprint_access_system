@@ -1,4 +1,11 @@
-use embassy_stm32::usart::{BasicInstance, RxDma, TxDma, Uart};
+use defmt::println;
+use embassy_stm32::{
+    bind_interrupts,
+    gpio::Output,
+    interrupt::typelevel::Binding,
+    peripherals::PA3,
+    usart::{BasicInstance, InterruptHandler, RxDma, RxPin, TxDma, TxPin, Uart},
+};
 use embassy_time::Timer;
 use num_enum::TryFromPrimitive;
 
@@ -6,6 +13,7 @@ use num_enum::TryFromPrimitive;
 pub const START_CODE: u16 = 0xEF01;
 pub const START_CODE_H: u8 = (START_CODE >> 8) as u8;
 pub const START_CODE_L: u8 = (START_CODE & 0xFF) as u8;
+const SENSOR_BAUDRATE: u32 = 57600;
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
@@ -169,23 +177,74 @@ impl From<embassy_stm32::usart::Error> for FingerError {
 }
 
 pub struct FingerprintSensor<'a, T: BasicInstance, TXDMA, RXDMA> {
+    enable_pin: Output<'a, PA3>,
     uart: Uart<'a, T, TXDMA, RXDMA>,
     address: [u8; 4],
     password: [u8; 4],
 }
 
+pub struct SensorSetup<'a, T, TXP, RXP, TXDMA, RXDMA>
+where
+    T: BasicInstance,
+    TXDMA: TxDma<T>,
+    RXDMA: RxDma<T>,
+    TXP: TxPin<T>,
+    RXP: RxPin<T>,
+{
+    pub address: [u8; 4],
+    pub password: [u8; 4],
+    pub baudrate: u32,
+    pub usart: T,
+    pub tx_pin: TXP,
+    pub rx_pin: RXP,
+    pub tx_dma: TXDMA,
+    pub rx_dma: RXDMA,
+    pub enable_pin: Output<'a, PA3>,
+}
+bind_interrupts!(pub struct Irqs {
+    USART1 => InterruptHandler<embassy_stm32::peripherals::USART1>;
+});
 impl<'a, T, TXDMA, RXDMA> FingerprintSensor<'a, T, TXDMA, RXDMA>
 where
     T: BasicInstance,
     TXDMA: TxDma<T>,
     RXDMA: RxDma<T>,
 {
-    pub fn new(uart: Uart<'a, T, TXDMA, RXDMA>, address: [u8; 4], password: [u8; 4]) -> Self {
-        Self {
-            uart,
-            address,
-            password,
-        }
+    pub async fn new<TXP, RXP>(mut setup: SensorSetup<'a, T, TXP, RXP, TXDMA, RXDMA>) -> Self
+    where
+        TXP: TxPin<T>,
+        RXP: RxPin<T>,
+        Irqs: Binding<T::Interrupt, InterruptHandler<T>>,
+    {
+        setup.enable_pin.set_low();
+        Timer::after_millis(500).await;
+        let mut fingerprint_uart_config = embassy_stm32::usart::Config::default();
+        fingerprint_uart_config.baudrate = SENSOR_BAUDRATE;
+        let fingerprint_uart = Uart::new(
+            setup.usart,
+            setup.rx_pin,
+            setup.tx_pin,
+            Irqs,
+            setup.tx_dma,
+            setup.rx_dma,
+            fingerprint_uart_config,
+        )
+        .unwrap();
+        let mut sensor = Self {
+            enable_pin: setup.enable_pin,
+            uart: fingerprint_uart,
+            address: setup.address,
+            password: setup.password,
+        };
+        let _ = sensor.verify_password().await;
+        sensor
+    }
+
+    pub async fn enable(&mut self) -> Result<(), FingerError> {
+        self.enable_pin.set_low();
+        Timer::after_millis(1000).await;
+        self.verify_password().await?;
+        Ok(())
     }
 
     async fn receive_packet<const N: usize>(&mut self) -> Result<Response<N>, FingerError> {
@@ -388,9 +447,7 @@ where
                 let score = u16::from_be_bytes([response.data[3], response.data[4]]);
                 Ok((page_id, score))
             }
-            ConfirmationCode::NoFinger => {
-                Err(FingerError::NoMatch)
-            }
+            ConfirmationCode::NoFinger => Err(FingerError::NoMatch),
             _ => Err(FingerError::Sensor(ack_code)),
         }
     }
