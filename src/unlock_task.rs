@@ -1,5 +1,6 @@
 use core::u64;
 
+use defmt::println;
 use embassy_stm32 as _;
 use embassy_stm32 as _;
 
@@ -34,14 +35,14 @@ pub async fn unlock_task(mut pwm: SimplePwm<'static, TIM1>) {
 pub async fn unlock(pwm: &mut SimplePwm<'static, TIM1>) {
     const KICK_MS: u64 = 100;
     const HOLD_MS: u64 = 3000;
-    const HOLD_DUTY_DIVIDER: u16 = 2;
+    const HOLD_DUTY_MULTIPLIER: f32 = 0.75;
     const CHANNEL: embassy_stm32::timer::Channel = embassy_stm32::timer::Channel::Ch1;
 
     let max_duty = pwm.get_max_duty();
     pwm.enable(CHANNEL);
     pwm.set_duty(CHANNEL, max_duty);
     Timer::after_millis(KICK_MS).await;
-    pwm.set_duty(CHANNEL, max_duty / HOLD_DUTY_DIVIDER);
+    pwm.set_duty(CHANNEL, (max_duty as f32 * HOLD_DUTY_MULTIPLIER) as u16);
     Timer::after_millis(HOLD_MS).await;
     pwm.set_duty(CHANNEL, 0);
     pwm.disable(CHANNEL);

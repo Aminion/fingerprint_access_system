@@ -54,11 +54,13 @@ pub async fn fingerprint_manager_task(mut sensor: FingerprintSensor) {
     }
     loop {
         let cmd = FINGERPRINT_CHANNEL.receive().await;
+        println!("requested");
+        let _ = sensor.enable().await;
+        println!("enabled");
         match cmd {
             SensorCommand::ValidateAccess(signal) => {
                 let result: Result<_, FingerError> = async {
                     sensor.led(&EFFECT_IN_PROGRESS).await?;
-                    println!("generating image");
                     sensor.generate_image().await?;
                     sensor.image_to_template(1).await?;
                     sensor.search_database(1, 0, 200).await?;
@@ -96,6 +98,7 @@ pub async fn fingerprint_manager_task(mut sensor: FingerprintSensor) {
                 }
             },
         }
+        sensor.disable();
     }
 }
 

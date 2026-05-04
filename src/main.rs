@@ -12,7 +12,7 @@ use embassy_stm32::adc::Adc;
 use embassy_stm32::bind_interrupts;
 use embassy_stm32::exti::ExtiInput;
 use embassy_stm32::gpio::{Input, Level, Output, OutputType, Pull, Speed};
-use embassy_stm32::peripherals::{DMA1_CH1, DMA1_CH2, USART1};
+use embassy_stm32::peripherals::{DMA1_CH1, DMA1_CH2, PB6, PB7, USART1};
 use embassy_stm32::time::{khz, Hertz};
 use embassy_stm32::timer::simple_pwm::{PwmPin, SimplePwm};
 use embassy_stm32::usart::{InterruptHandler, Uart};
@@ -20,6 +20,7 @@ use embassy_time::Timer;
 use {defmt_rtt as _, panic_probe as _};
 
 use crate::fingerprint_irq_task::FINGERPRINT_IRQ_STATUS;
+use crate::fingerprint_sensor::Irqs;
 use crate::fingerprint_task::add_new_finger_task;
 use crate::unlock_task::unlock;
 mod battery_monitoring_task;
@@ -46,21 +47,29 @@ const SOLENOID_FREQUENCY: Hertz = khz(10);
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_stm32::init(Default::default());
-    let mut button_pin1 = Output::new(p.PA3, Level::High, Speed::Low);
+    let button_pin1 = Output::new(p.PA3, Level::High, Speed::Low);
 
-    let sensor_setup = fingerprint_sensor::SensorSetup {
-        address: SENSOR_ADDRESS,
-        password: SENSOR_PASSWORD,
-        baudrate: SENSOR_BAUDRATE,
-        usart: p.USART1,
-        tx_pin: p.PB6,
-        rx_pin: p.PB7,
-        tx_dma: p.DMA1_CH1,
-        rx_dma: p.DMA1_CH2,
-        enable_pin: button_pin1,
-    };
+    let mut fingerprint_uart_config = embassy_stm32::usart::Config::default();
+    fingerprint_uart_config.baudrate = SENSOR_BAUDRATE;
 
-    let sensor = FingerprintSensor::new(sensor_setup).await;
+    let fingerprint_uart = Uart::new(
+        p.USART1,
+        p.PB7,
+        p.PB6,
+        Irqs,
+        p.DMA1_CH1,
+        p.DMA1_CH2,
+        fingerprint_uart_config,
+    )
+    .unwrap();
+
+    let sensor = FingerprintSensor::new::<PB6, PB7>(
+        button_pin1,
+        SENSOR_ADDRESS,
+        SENSOR_PASSWORD,
+        fingerprint_uart,
+    )
+    .await;
 
     FINGERPRINT_IRQ_STATUS.sender().send(false);
     let button_pin = Input::new(p.PA2, Pull::Up);
