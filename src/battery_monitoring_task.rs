@@ -1,6 +1,7 @@
 use embassy_stm32::adc::{Adc, SampleTime};
 use embassy_stm32::gpio::Output;
-use embassy_stm32::peripherals::{ADC1, PA4, PA5, PB3};
+use embassy_stm32::peripherals::{ADC1, PA4, PA5};
+use embassy_stm32::Peri;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer};
@@ -40,16 +41,15 @@ const DELAY: Duration = Duration::from_secs(3600); // 1 hour
 #[embassy_executor::task]
 pub async fn battery_monitor_task(
     mut adc: Adc<'static, ADC1>,
-    mut measure_pin: PA5,
-    mut reference_enable_pin: Output<'static, PB3>,
-    mut reference_pin: PA4,
+    mut measure_pin: Peri<'static, PA5>,
+    mut reference_enable_pin: Output<'static>,
+    mut reference_pin: Peri<'static, PA4>,
 ) {
-    adc.set_sample_time(SampleTime::Cycles160_5);
     loop {
         reference_enable_pin.set_high();
 
-        let ref_sample = adc.read(&mut reference_pin);
-        let bat_sample = adc.read(&mut measure_pin);
+        let ref_sample = adc.blocking_read(&mut reference_pin, SampleTime::CYCLES160_5);
+        let bat_sample = adc.blocking_read(&mut measure_pin, SampleTime::CYCLES160_5);
 
         reference_enable_pin.set_low();
 

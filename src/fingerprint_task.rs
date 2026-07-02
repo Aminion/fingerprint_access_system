@@ -2,7 +2,7 @@ use defmt::println;
 use embassy_stm32 as _;
 use embassy_stm32 as _;
 use embassy_stm32::exti::ExtiInput;
-use embassy_stm32::peripherals::PA8;
+use embassy_stm32::mode::Async;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::signal::Signal;
@@ -54,9 +54,8 @@ pub async fn fingerprint_manager_task(mut sensor: FingerprintSensor) {
     }
     loop {
         let cmd = FINGERPRINT_CHANNEL.receive().await;
-        println!("requested");
+        println!("receive");
         let _ = sensor.enable().await;
-        println!("enabled");
         match cmd {
             SensorCommand::ValidateAccess(signal) => {
                 let result: Result<_, FingerError> = async {
@@ -99,11 +98,12 @@ pub async fn fingerprint_manager_task(mut sensor: FingerprintSensor) {
             },
         }
         sensor.disable();
+        println!("end receive");
     }
 }
 
 #[embassy_executor::task]
-pub async fn add_new_finger_task(mut pin: ExtiInput<'static, PA8>) {
+pub async fn add_new_finger_task(mut pin: ExtiInput<'static, Async>) {
     static DONE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
     loop {
         pin.wait_for_low().await;

@@ -1,4 +1,4 @@
-use embassy_stm32::{gpio::Output, peripherals::PB9};
+use embassy_stm32::gpio::Output;
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, signal::Signal,
 };
@@ -15,7 +15,7 @@ pub struct BeeperCommand {
 }
 
 #[embassy_executor::task]
-pub async fn beeper_task(mut beeper_pin: Output<'static, PB9>) {
+pub async fn beeper_task(mut beeper_pin: Output<'static>) {
     loop {
         let cmd = BEEPER_CHANNEL.receive().await;
         for _ in 0..cmd.times {

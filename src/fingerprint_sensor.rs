@@ -1,19 +1,16 @@
-use defmt::println;
 use embassy_stm32::{
-    bind_interrupts,
+    bind_interrupts, dma, exti,
     gpio::Output,
-    interrupt::typelevel::Binding,
-    peripherals::PA3,
-    usart::{BasicInstance, InterruptHandler, RxDma, RxPin, TxDma, TxPin, Uart},
+    usart::{InterruptHandler, Uart},
 };
-use embassy_time::{with_timeout, Duration, Timer};
+use embassy_stm32::mode::Async;
+use embassy_time::Timer;
 use num_enum::TryFromPrimitive;
 
 /// Standard start code for all R503 packets (High byte: 0xEF, Low byte: 0x01)
 pub const START_CODE: u16 = 0xEF01;
 pub const START_CODE_H: u8 = (START_CODE >> 8) as u8;
 pub const START_CODE_L: u8 = (START_CODE & 0xFF) as u8;
-const SENSOR_BAUDRATE: u32 = 57600;
 const POWER_UP_BYTE: u8 = 0x55;
 
 #[repr(u8)]
@@ -177,32 +174,27 @@ impl From<embassy_stm32::usart::Error> for FingerError {
     }
 }
 
-pub struct FingerprintSensor<'a, T: BasicInstance, TXDMA, RXDMA> {
-    enable_pin: Output<'a, PA3>,
-    uart: Uart<'a, T, TXDMA, RXDMA>,
+pub struct FingerprintSensor<'a> {
+    enable_pin: Output<'a>,
+    uart: Uart<'a, Async>,
     address: [u8; 4],
     password: [u8; 4],
 }
+
 bind_interrupts!(pub struct Irqs {
     USART1 => InterruptHandler<embassy_stm32::peripherals::USART1>;
+    DMA1_CHANNEL1 => dma::InterruptHandler<embassy_stm32::peripherals::DMA1_CH1>;
+    DMA1_CHANNEL2_3 => dma::InterruptHandler<embassy_stm32::peripherals::DMA1_CH2>;
+    EXTI2_3 => exti::InterruptHandler<embassy_stm32::interrupt::typelevel::EXTI2_3>;
 });
-impl<'a, T, TXDMA, RXDMA> FingerprintSensor<'a, T, TXDMA, RXDMA>
-where
-    T: BasicInstance,
-    TXDMA: TxDma<T>,
-    RXDMA: RxDma<T>,
-{
-    pub async fn new<TXP, RXP>(
-        enable_pin: Output<'a, PA3>,
+
+impl<'a> FingerprintSensor<'a> {
+    pub async fn new(
+        enable_pin: Output<'a>,
         address: [u8; 4],
         password: [u8; 4],
-        uart: Uart<'a, T, TXDMA, RXDMA>,
-    ) -> Self
-    where
-        TXP: TxPin<T>,
-        RXP: RxPin<T>,
-        Irqs: Binding<T::Interrupt, InterruptHandler<T>>,
-    {
+        uart: Uart<'a, Async>,
+    ) -> Self {
         Timer::after_millis(500).await;
         Self {
             enable_pin,
@@ -214,9 +206,10 @@ where
 
     pub async fn enable(&mut self) -> Result<(), FingerError> {
         self.enable_pin.set_low();
-
+        let mut buf = [0u8; 1];
         loop {
-            if Ok(POWER_UP_BYTE) == self.uart.nb_read() {
+            self.uart.read(&mut buf).await?;
+            if buf[0] == POWER_UP_BYTE {
                 break;
             }
         }
