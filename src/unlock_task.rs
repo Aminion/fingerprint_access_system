@@ -1,5 +1,3 @@
-use core::u64;
-
 use embassy_stm32 as _;
 use embassy_stm32::peripherals::TIM1;
 use embassy_stm32::timer::simple_pwm::SimplePwm;
@@ -31,14 +29,12 @@ pub async fn unlock_task(mut pwm: SimplePwm<'static, TIM1>) {
 pub async fn unlock(pwm: &mut SimplePwm<'static, TIM1>) {
     const KICK_MS: u64 = 200;
     const HOLD_MS: u64 = 3000;
-    const HOLD_DUTY_MULTIPLIER: f32 = 0.75;
 
-    let max_duty = pwm.ch1().max_duty_cycle();
     pwm.ch1().enable();
-    pwm.ch1().set_duty_cycle(max_duty);
+    pwm.ch1().set_duty_cycle_fully_on();
     Timer::after_millis(KICK_MS).await;
-    pwm.ch1().set_duty_cycle((max_duty as f32 * HOLD_DUTY_MULTIPLIER) as u32);
+    pwm.ch1().set_duty_cycle_fraction(3, 4);
     Timer::after_millis(HOLD_MS).await;
-    pwm.ch1().set_duty_cycle(0);
+    pwm.ch1().set_duty_cycle_fully_off();
     pwm.ch1().disable();
 }

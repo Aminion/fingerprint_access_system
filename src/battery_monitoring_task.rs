@@ -49,8 +49,13 @@ pub async fn battery_monitor_task(
 
         reference_enable_pin.set_low();
 
-        let discrepancy = REF_LEVEL - ref_sample;
-        let bat_sample_corrected = bat_sample + discrepancy;
+        // Ratiometric correction: scale battery reading by how far the reference
+        // deviates from its expected level. Handles both ADC over- and under-read.
+        let bat_sample_corrected = if ref_sample > 0 {
+            (bat_sample as u32 * REF_LEVEL as u32 / ref_sample as u32) as u16
+        } else {
+            bat_sample
+        };
         if bat_sample_corrected <= V_CRITICAL_LEVEL {
             BEEPER_CHANNEL.send(LOW_LEVEL_SIGNAL).await;
         } else if bat_sample_corrected <= V_LOW_LEVEL {

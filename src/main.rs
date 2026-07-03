@@ -4,7 +4,6 @@
 #![feature(impl_trait_in_assoc_type)]
 #![allow(incomplete_features)]
 
-use core::u64;
 use embassy_executor::Spawner;
 use embassy_stm32 as _;
 use embassy_stm32::adc::Adc;
