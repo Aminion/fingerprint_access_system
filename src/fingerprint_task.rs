@@ -60,7 +60,7 @@ impl Drop for SensorGuard {
 #[embassy_executor::task]
 pub async fn fingerprint_manager_task(mut sensor: FingerprintSensor) {
     async fn finger_on_sensor(expected_state: bool) {
-        let mut receiver = FINGERPRINT_IRQ_STATUS.receiver().unwrap();
+        let mut receiver = FINGERPRINT_IRQ_STATUS.receiver().expect("FINGERPRINT_IRQ_STATUS: all receiver slots taken");
         loop {
             if receiver.get().await == expected_state {
                 return;
@@ -123,13 +123,13 @@ pub async fn fingerprint_manager_task(mut sensor: FingerprintSensor) {
                 }
                 .await;
 
-                signal.signal(());
-
                 if result.is_ok() {
                     { let _g = SensorGuard::new(); sensor.led_await(&EFFECT_SUCCESS).await.ok(); }
                     finger_on_sensor(false).await;
+                    signal.signal(());
                     break;
                 }
+                // error: retry without signaling — caller stays blocked until success
             },
         }
 

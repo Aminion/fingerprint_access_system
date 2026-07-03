@@ -11,21 +11,23 @@ pub struct BeeperCommand {
     pub duration: Duration,
     pub delay: Duration,
     pub times: u8,
-    pub done: &'static Signal<CriticalSectionRawMutex, ()>,
+    pub done: Option<&'static Signal<CriticalSectionRawMutex, ()>>,
 }
 
 #[embassy_executor::task]
 pub async fn beeper_task(mut beeper_pin: Output<'static>) {
     loop {
         let cmd = BEEPER_CHANNEL.receive().await;
-        for _ in 0..cmd.times {
+        for i in 0..cmd.times {
             beeper_pin.set_high();
             Timer::after(cmd.duration).await;
             beeper_pin.set_low();
-            if cmd.times > 0 {
+            if i + 1 < cmd.times {
                 Timer::after(cmd.delay).await;
             }
         }
-        cmd.done.signal(());
+        if let Some(done) = cmd.done {
+            done.signal(());
+        }
     }
 }

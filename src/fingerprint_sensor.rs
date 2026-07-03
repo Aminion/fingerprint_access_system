@@ -4,7 +4,7 @@ use embassy_stm32::{
     usart::{InterruptHandler, Uart},
 };
 use embassy_stm32::mode::Async;
-use embassy_time::Timer;
+use embassy_time::{with_timeout, Duration, Timer};
 use num_enum::TryFromPrimitive;
 
 /// Standard start code for all R503 packets (High byte: 0xEF, Low byte: 0x01)
@@ -12,6 +12,8 @@ pub const START_CODE: u16 = 0xEF01;
 pub const START_CODE_H: u8 = (START_CODE >> 8) as u8;
 pub const START_CODE_L: u8 = (START_CODE & 0xFF) as u8;
 const POWER_UP_BYTE: u8 = 0x55;
+const ENABLE_TIMEOUT: Duration = Duration::from_millis(2000);
+const PACKET_TIMEOUT: Duration = Duration::from_millis(1000);
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
@@ -129,6 +131,7 @@ pub enum FingerError {
 
     NoFinger,
     NoMatch,
+    Timeout,
 }
 
 #[repr(u8)]
@@ -207,11 +210,19 @@ impl<'a> FingerprintSensor<'a> {
     pub async fn enable(&mut self) -> Result<(), FingerError> {
         self.enable_pin.set_low();
         let mut buf = [0u8; 1];
-        loop {
-            self.uart.read(&mut buf).await?;
-            if buf[0] == POWER_UP_BYTE {
-                break;
-            }
+        {
+            let uart = &mut self.uart;
+            with_timeout(ENABLE_TIMEOUT, async {
+                loop {
+                    uart.read(&mut buf).await?;
+                    if buf[0] == POWER_UP_BYTE {
+                        break;
+                    }
+                }
+                Ok::<(), FingerError>(())
+            })
+            .await
+            .map_err(|_| FingerError::Timeout)??;
         }
         self.verify_password().await?;
         Ok(())
@@ -222,11 +233,12 @@ impl<'a> FingerprintSensor<'a> {
 
     async fn receive_packet<const N: usize>(&mut self) -> Result<Response<N>, FingerError> {
         let mut header = [0u8; 9];
+        let uart = &mut self.uart;
 
-        self.uart
-            .read(&mut header)
+        with_timeout(PACKET_TIMEOUT, uart.read(&mut header))
             .await
-            .map_err(|e| FingerError::Uart(e))?;
+            .map_err(|_| FingerError::Timeout)?
+            .map_err(FingerError::Uart)?;
 
         if u16::from_be_bytes([header[0], header[1]]) != START_CODE {
             return Err(FingerError::Protocol("Invalid Start Code"));
@@ -241,10 +253,10 @@ impl<'a> FingerprintSensor<'a> {
         if length_field > body.len() {
             return Err(FingerError::NoFinger);
         }
-        self.uart
-            .read(&mut body[..length_field])
+        with_timeout(PACKET_TIMEOUT, uart.read(&mut body[..length_field]))
             .await
-            .map_err(|_| FingerError::NoFinger)?;
+            .map_err(|_| FingerError::Timeout)?
+            .map_err(FingerError::Uart)?;
         let checksum = u16::from_be_bytes([body[length_field - 2], body[length_field - 1]]);
         let mut data = [0u8; N];
         //in case if we got error instead of answer
@@ -260,7 +272,7 @@ impl<'a> FingerprintSensor<'a> {
         })
     }
 
-    async fn ack_packet<const N: usize>(
+    fn ack_packet<const N: usize>(
         response: &Response<N>,
     ) -> Result<ConfirmationCode, FingerError> {
         if response.packet_type != PacketType::Acknowledgement {
@@ -295,7 +307,7 @@ impl<'a> FingerprintSensor<'a> {
         self.uart.write(&cmd).await?;
 
         let pkt = self.receive_packet::<1>().await?;
-        let ack_code = Self::ack_packet(&pkt).await?;
+        let ack_code = Self::ack_packet(&pkt)?;
 
         if ack_code == ConfirmationCode::Ok {
             Ok(())
@@ -307,7 +319,7 @@ impl<'a> FingerprintSensor<'a> {
         let cmd = Self::create_verify_packet(&self.address, &self.password);
         self.uart.write(&cmd).await?;
         let response = self.receive_packet::<1>().await?;
-        let ack_code = Self::ack_packet(&response).await?;
+        let ack_code = Self::ack_packet(&response)?;
         if ack_code == ConfirmationCode::Ok {
             Ok(())
         } else {
@@ -325,7 +337,7 @@ impl<'a> FingerprintSensor<'a> {
         self.uart.write(&cmd).await?;
 
         let response = self.receive_packet::<1>().await?;
-        let ack_code = Self::ack_packet(&response).await?;
+        let ack_code = Self::ack_packet(&response)?;
         if ack_code == ConfirmationCode::Ok {
             Ok(())
         } else {
@@ -340,7 +352,7 @@ impl<'a> FingerprintSensor<'a> {
         self.uart.write(&cmd).await?;
 
         let response = self.receive_packet::<1>().await?;
-        let ack_code = Self::ack_packet(&response).await?;
+        let ack_code = Self::ack_packet(&response)?;
         if ack_code == ConfirmationCode::Ok {
             Ok(())
         } else {
@@ -361,7 +373,7 @@ impl<'a> FingerprintSensor<'a> {
         self.uart.write(&cmd).await?;
 
         let response = self.receive_packet::<1>().await?;
-        let ack_code = Self::ack_packet(&response).await?;
+        let ack_code = Self::ack_packet(&response)?;
         if ack_code == ConfirmationCode::Ok {
             Ok(())
         } else {
@@ -376,7 +388,7 @@ impl<'a> FingerprintSensor<'a> {
         self.uart.write(&cmd).await?;
 
         let response = self.receive_packet::<1>().await?;
-        let ack_code = Self::ack_packet(&response).await?;
+        let ack_code = Self::ack_packet(&response)?;
         if ack_code == ConfirmationCode::Ok {
             Ok(())
         } else {
@@ -413,7 +425,7 @@ impl<'a> FingerprintSensor<'a> {
         self.uart.write(&cmd).await?;
 
         let response = self.receive_packet::<5>().await?;
-        let ack_code = Self::ack_packet(&response).await?;
+        let ack_code = Self::ack_packet(&response)?;
         match ack_code {
             ConfirmationCode::Ok => {
                 let page_id = u16::from_be_bytes([response.data[1], response.data[2]]);

@@ -16,7 +16,7 @@ static DONE: Signal<CriticalSectionRawMutex, bool> = Signal::new();
 
 #[embassy_executor::task]
 pub async fn unlock_task(mut pwm: SimplePwm<'static, TIM1>) {
-    let mut receiver = FINGERPRINT_IRQ_STATUS.receiver().unwrap();
+    let mut receiver = FINGERPRINT_IRQ_STATUS.receiver().expect("FINGERPRINT_IRQ_STATUS: all receiver slots taken");
     loop {
         receiver.changed_and(|v| *v).await;
         FINGERPRINT_CHANNEL

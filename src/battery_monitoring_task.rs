@@ -2,8 +2,6 @@ use embassy_stm32::adc::{Adc, SampleTime};
 use embassy_stm32::gpio::Output;
 use embassy_stm32::peripherals::{ADC1, PA4, PA5};
 use embassy_stm32::Peri;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer};
 
 use crate::beeper_task::{BeeperCommand, BEEPER_CHANNEL};
@@ -20,20 +18,18 @@ const V_LOW_LEVEL: u16 = (V_LOW / V_FULL * ADC_RANGE) as u16;
 const V_CRITICAL_LEVEL: u16 = (V_CRITICAL / V_FULL * ADC_RANGE) as u16;
 const REF_LEVEL: u16 = (REF_V / ADC_MAX_V * ADC_RANGE) as u16;
 
-static DONE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
-
 const LOW_LEVEL_SIGNAL: BeeperCommand = BeeperCommand {
     duration: embassy_time::Duration::from_millis(500),
     delay: embassy_time::Duration::from_millis(0),
     times: 1,
-    done: &DONE,
+    done: None,
 };
 
 const CRITICAL_LEVEL_SIGNAL: BeeperCommand = BeeperCommand {
     duration: embassy_time::Duration::from_millis(500),
     delay: embassy_time::Duration::from_millis(100),
     times: 3,
-    done: &DONE,
+    done: None,
 };
 
 const DELAY: Duration = Duration::from_secs(3600); // 1 hour
