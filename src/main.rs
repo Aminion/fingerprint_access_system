@@ -12,7 +12,6 @@ use embassy_stm32::gpio::{Level, Output, Pull, Speed, OutputType};
 use embassy_stm32::time::{khz, Hertz};
 use embassy_stm32::timer::simple_pwm::{PwmPin, SimplePwm};
 use embassy_stm32::usart::Uart;
-use embassy_time::Timer;
 use {defmt_rtt as _, panic_probe as _};
 
 use crate::fingerprint_irq_task::FINGERPRINT_IRQ_STATUS;
@@ -78,9 +77,8 @@ async fn main(spawner: Spawner) {
     );
 
     spawner.spawn(unlock_task(solenoid_pin).unwrap());
-    loop {
-        Timer::after_secs(u32::MAX as u64).await;
-    }
+    // Park forever without occupying a timer-queue slot.
+    core::future::pending::<()>().await;
 
     //let button_pin = Input::new(p.PB8, Pull::Up);
     //let add_finger_pin = ExtiInput::new(button_pin, p.EXTI8);

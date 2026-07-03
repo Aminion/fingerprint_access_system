@@ -9,8 +9,6 @@ use num_enum::TryFromPrimitive;
 
 /// Standard start code for all R503 packets (High byte: 0xEF, Low byte: 0x01)
 pub const START_CODE: u16 = 0xEF01;
-pub const START_CODE_H: u8 = (START_CODE >> 8) as u8;
-pub const START_CODE_L: u8 = (START_CODE & 0xFF) as u8;
 const POWER_UP_BYTE: u8 = 0x55;
 const ENABLE_TIMEOUT: Duration = Duration::from_millis(2000);
 const PACKET_TIMEOUT: Duration = Duration::from_millis(1000);
@@ -319,7 +317,7 @@ impl<'a> FingerprintSensor<'a> {
     where
         [(); N + 11]:,
     {
-        self.transact::<N, 1>(payload).await.map(|_| ())
+        self.transact::<_, 1>(payload).await.map(|_| ())
     }
 
     pub async fn led_await(&mut self, effect: &LedEffect) -> Result<(), FingerError> {
@@ -382,7 +380,7 @@ impl<'a> FingerprintSensor<'a> {
         let [ch, cl] = count.to_be_bytes();
         let payload = [Instruction::Search as u8, buffer_id, ph, pl, ch, cl];
 
-        match self.transact::<6, 5>(&payload).await {
+        match self.transact::<_, 5>(&payload).await {
             Ok(data) => {
                 let page_id = u16::from_be_bytes([data[1], data[2]]);
                 let score = u16::from_be_bytes([data[3], data[4]]);
@@ -403,40 +401,25 @@ fn packet<const N: usize>(
 
     let (len, sum) = compute_checksum(packet_type, data);
 
-    pkt[0] = START_CODE_H;
-    pkt[1] = START_CODE_L;
+    pkt[0..2].copy_from_slice(&START_CODE.to_be_bytes());
 
     // 4 bytes of Address
     pkt[2..6].copy_from_slice(address);
 
     pkt[6] = packet_type as u8;
-
-    let (len_h, len_l) = split_to_bytes(len);
-    pkt[7] = len_h;
-    pkt[8] = len_l;
-
+    pkt[7..9].copy_from_slice(&len.to_be_bytes());
     pkt[9..9 + N].copy_from_slice(data);
-
-    let (sum_h, sum_l) = split_to_bytes(sum);
-    pkt[9 + N] = sum_h;
-    pkt[9 + N + 1] = sum_l;
+    pkt[9 + N..9 + N + 2].copy_from_slice(&sum.to_be_bytes());
 
     pkt
 }
 
-fn split_to_bytes(value: u16) -> (u8, u8) {
-    let high_byte = (value >> 8) as u8;
-    let low_byte = (value & 0xFF) as u8;
-    (high_byte, low_byte)
-}
-
 fn compute_checksum(packet_type: PacketType, data: &[u8]) -> (u16, u16) {
     let len = (data.len() + 2) as u16;
-    let (len_high_byte, len_low_byte) = split_to_bytes(len);
-    let mut sum: u16 = 0;
-    sum = sum + packet_type as u16;
-    sum = sum + len_high_byte as u16;
-    sum = sum + len_low_byte as u16;
+    let [len_h, len_l] = len.to_be_bytes();
+    let mut sum = packet_type as u16;
+    sum = sum.wrapping_add(len_h as u16);
+    sum = sum.wrapping_add(len_l as u16);
 
     for &b in data.iter() {
         sum = sum.wrapping_add(b as u16);
