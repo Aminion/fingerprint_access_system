@@ -57,9 +57,9 @@ pub async fn battery_monitor_task(
             bat_sample
         };
         if bat_sample_corrected <= V_CRITICAL_LEVEL {
-            BEEPER_CHANNEL.send(LOW_LEVEL_SIGNAL).await;
-        } else if bat_sample_corrected <= V_LOW_LEVEL {
             BEEPER_CHANNEL.send(CRITICAL_LEVEL_SIGNAL).await;
+        } else if bat_sample_corrected <= V_LOW_LEVEL {
+            BEEPER_CHANNEL.send(LOW_LEVEL_SIGNAL).await;
         }
         Timer::after(DELAY).await;
     }
