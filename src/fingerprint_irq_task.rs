@@ -44,6 +44,12 @@ pub async fn fingerprint_irq_task(mut pin: ExtiInput<'static, Async>) {
                 // Give the pin a moment to settle after a sensor command finishes
                 // or the sensor is powered down.
                 Timer::after_millis(10).await;
+                if SENSOR_ACTIVE.load(Ordering::Relaxed) {
+                    // A new command window opened while we waited — the pin may be
+                    // glitching again. Skip; that window's guard drop will re-fire
+                    // the resync when it closes.
+                    continue;
+                }
                 let current = pin.is_low();
                 defmt::println!("irq resync: finger={}", current);
                 if current != state {
