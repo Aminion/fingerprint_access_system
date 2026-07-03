@@ -213,15 +213,21 @@ impl<'a> FingerprintSensor<'a> {
             let uart = &mut self.uart;
             with_timeout(ENABLE_TIMEOUT, async {
                 loop {
-                    uart.read(&mut buf).await?;
-                    if buf[0] == POWER_UP_BYTE {
-                        break;
+                    // The power transition leaves residue on the RX line: a
+                    // break/framing error latched while the sensor TX was at 0V,
+                    // plus possible noise bytes. Reading is the only way to clear
+                    // the flags, so discard both errors and non-0x55 bytes until
+                    // the genuine power-up handshake arrives; the outer timeout
+                    // bounds a truly dead sensor.
+                    if let Ok(()) = uart.read(&mut buf).await {
+                        if buf[0] == POWER_UP_BYTE {
+                            break;
+                        }
                     }
                 }
-                Ok::<(), FingerError>(())
             })
             .await
-            .map_err(|_| FingerError::Timeout)??;
+            .map_err(|_| FingerError::Timeout)?;
         }
         self.verify_password().await?;
         Ok(())
@@ -289,19 +295,31 @@ impl<'a> FingerprintSensor<'a> {
         Ok(code)
     }
 
+    /// Send a command payload and return the RESP data bytes of the
+    /// acknowledgement (data[0] is the confirmation code, already checked).
+    async fn transact<const REQ: usize, const RESP: usize>(
+        &mut self,
+        payload: &[u8; REQ],
+    ) -> Result<[u8; RESP], FingerError>
+    where
+        [(); REQ + 11]:,
+    {
+        let cmd = packet(PacketType::Command, &self.address, payload);
+        self.uart.write(&cmd).await?;
+        let response = self.receive_packet::<RESP>().await?;
+        let ack_code = Self::ack_packet(&response)?;
+        if ack_code == ConfirmationCode::Ok {
+            Ok(response.data)
+        } else {
+            Err(FingerError::Sensor(ack_code))
+        }
+    }
+
     async fn send_command<const N: usize>(&mut self, payload: &[u8; N]) -> Result<(), FingerError>
     where
         [(); N + 11]:,
     {
-        let cmd = packet(PacketType::Command, &self.address, payload);
-        self.uart.write(&cmd).await?;
-        let response = self.receive_packet::<1>().await?;
-        let ack_code = Self::ack_packet(&response)?;
-        if ack_code == ConfirmationCode::Ok {
-            Ok(())
-        } else {
-            Err(FingerError::Sensor(ack_code))
-        }
+        self.transact::<N, 1>(payload).await.map(|_| ())
     }
 
     pub async fn led_await(&mut self, effect: &LedEffect) -> Result<(), FingerError> {
@@ -360,31 +378,18 @@ impl<'a> FingerprintSensor<'a> {
         start_page: u16,
         count: u16,
     ) -> Result<(u16, u16), FingerError> {
-        let start_bytes = start_page.to_be_bytes();
-        let count_bytes = count.to_be_bytes();
+        let [ph, pl] = start_page.to_be_bytes();
+        let [ch, cl] = count.to_be_bytes();
+        let payload = [Instruction::Search as u8, buffer_id, ph, pl, ch, cl];
 
-        let payload = [
-            Instruction::Search as u8,
-            buffer_id,
-            start_bytes[0],
-            start_bytes[1],
-            count_bytes[0],
-            count_bytes[1],
-        ];
-
-        let cmd = packet(PacketType::Command, &self.address, &payload);
-        self.uart.write(&cmd).await?;
-
-        let response = self.receive_packet::<5>().await?;
-        let ack_code = Self::ack_packet(&response)?;
-        match ack_code {
-            ConfirmationCode::Ok => {
-                let page_id = u16::from_be_bytes([response.data[1], response.data[2]]);
-                let score = u16::from_be_bytes([response.data[3], response.data[4]]);
+        match self.transact::<6, 5>(&payload).await {
+            Ok(data) => {
+                let page_id = u16::from_be_bytes([data[1], data[2]]);
+                let score = u16::from_be_bytes([data[3], data[4]]);
                 Ok((page_id, score))
             }
-            ConfirmationCode::NotFound => Err(FingerError::NoMatch),
-            _ => Err(FingerError::Sensor(ack_code)),
+            Err(FingerError::Sensor(ConfirmationCode::NotFound)) => Err(FingerError::NoMatch),
+            Err(e) => Err(e),
         }
     }
 }
