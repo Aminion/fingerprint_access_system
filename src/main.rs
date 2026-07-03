@@ -62,8 +62,7 @@ async fn main(spawner: Spawner) {
         SENSOR_ADDRESS,
         SENSOR_PASSWORD,
         fingerprint_uart,
-    )
-    .await;
+    );
 
     FINGERPRINT_IRQ_STATUS.sender().send(false);
     let fingerprint_irq_pin = ExtiInput::new(p.PA2, p.EXTI2, Pull::Up, Irqs);

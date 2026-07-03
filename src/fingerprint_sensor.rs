@@ -192,13 +192,12 @@ bind_interrupts!(pub struct Irqs {
 });
 
 impl<'a> FingerprintSensor<'a> {
-    pub async fn new(
+    pub fn new(
         enable_pin: Output<'a>,
         address: [u8; 4],
         password: [u8; 4],
         uart: Uart<'a, Async>,
     ) -> Self {
-        Timer::after_millis(500).await;
         Self {
             enable_pin,
             uart,
@@ -250,25 +249,30 @@ impl<'a> FingerprintSensor<'a> {
 
         let length_field = u16::from_be_bytes([header[7], header[8]]) as usize;
         let mut body = [0u8; 128];
-        if length_field > body.len() {
-            return Err(FingerError::NoFinger);
+        if length_field < 2 || length_field > body.len() {
+            return Err(FingerError::Protocol("Invalid Length"));
         }
         with_timeout(PACKET_TIMEOUT, uart.read(&mut body[..length_field]))
             .await
             .map_err(|_| FingerError::Timeout)?
             .map_err(FingerError::Uart)?;
-        let checksum = u16::from_be_bytes([body[length_field - 2], body[length_field - 1]]);
+
+        let received_checksum = u16::from_be_bytes([body[length_field - 2], body[length_field - 1]]);
+        let (_, expected_checksum) = compute_checksum(packet_type, &body[..length_field - 2]);
+        if received_checksum != expected_checksum {
+            return Err(FingerError::Protocol("Checksum mismatch"));
+        }
+
         let mut data = [0u8; N];
-        //in case if we got error instead of answer
         let data_to_copy = (length_field - 2).min(N);
-        data.copy_from_slice(&body[..data_to_copy]);
+        data[..data_to_copy].copy_from_slice(&body[..data_to_copy]);
 
         Ok(Response {
-            address: address,
+            address,
             packet_type,
             length: length_field as u16,
             data,
-            checksum,
+            checksum: received_checksum,
         })
     }
 
@@ -285,6 +289,21 @@ impl<'a> FingerprintSensor<'a> {
         Ok(code)
     }
 
+    async fn send_command<const N: usize>(&mut self, payload: &[u8; N]) -> Result<(), FingerError>
+    where
+        [(); N + 11]:,
+    {
+        let cmd = packet(PacketType::Command, &self.address, payload);
+        self.uart.write(&cmd).await?;
+        let response = self.receive_packet::<1>().await?;
+        let ack_code = Self::ack_packet(&response)?;
+        if ack_code == ConfirmationCode::Ok {
+            Ok(())
+        } else {
+            Err(FingerError::Sensor(ack_code))
+        }
+    }
+
     pub async fn led_await(&mut self, effect: &LedEffect) -> Result<(), FingerError> {
         let result = self.led(effect).await;
         if effect.cycles > 0 && result.is_ok() {
@@ -295,105 +314,37 @@ impl<'a> FingerprintSensor<'a> {
     }
 
     pub async fn led(&mut self, effect: &LedEffect) -> Result<(), FingerError> {
-        let payload = [
-            0x35,
+        self.send_command(&[
+            Instruction::AuraConfig as u8,
             effect.mode as u8,
             effect.speed,
             effect.color as u8,
             effect.cycles,
-        ];
-
-        let cmd = packet(PacketType::Command, &self.address, &payload);
-        self.uart.write(&cmd).await?;
-
-        let pkt = self.receive_packet::<1>().await?;
-        let ack_code = Self::ack_packet(&pkt)?;
-
-        if ack_code == ConfirmationCode::Ok {
-            Ok(())
-        } else {
-            return Err(FingerError::Sensor(ack_code));
-        }
+        ]).await
     }
+
     pub async fn verify_password(&mut self) -> Result<(), FingerError> {
-        let cmd = Self::create_verify_packet(&self.address, &self.password);
-        self.uart.write(&cmd).await?;
-        let response = self.receive_packet::<1>().await?;
-        let ack_code = Self::ack_packet(&response)?;
-        if ack_code == ConfirmationCode::Ok {
-            Ok(())
-        } else {
-            return Err(FingerError::Sensor(ack_code));
-        }
+        let mut payload = [0u8; 5];
+        payload[0] = Instruction::VfyPwd as u8;
+        payload[1..5].copy_from_slice(&self.password);
+        self.send_command(&payload).await
     }
 
     pub async fn generate_image(&mut self) -> Result<(), FingerError> {
-        let cmd = packet(
-            PacketType::Command,
-            &self.address,
-            &[Instruction::GenImg as u8],
-        );
-
-        self.uart.write(&cmd).await?;
-
-        let response = self.receive_packet::<1>().await?;
-        let ack_code = Self::ack_packet(&response)?;
-        if ack_code == ConfirmationCode::Ok {
-            Ok(())
-        } else {
-            return Err(FingerError::Sensor(ack_code));
-        }
+        self.send_command(&[Instruction::GenImg as u8]).await
     }
 
     pub async fn image_to_template(&mut self, buffer_id: u8) -> Result<(), FingerError> {
-        let payload = [Instruction::Img2Tz as u8, buffer_id];
-        let cmd = packet(PacketType::Command, &self.address, &payload);
-
-        self.uart.write(&cmd).await?;
-
-        let response = self.receive_packet::<1>().await?;
-        let ack_code = Self::ack_packet(&response)?;
-        if ack_code == ConfirmationCode::Ok {
-            Ok(())
-        } else {
-            return Err(FingerError::Sensor(ack_code));
-        }
+        self.send_command(&[Instruction::Img2Tz as u8, buffer_id]).await
     }
 
     pub async fn store_template(&mut self, buffer_id: u8, slot: u16) -> Result<(), FingerError> {
-        let slot_bytes = slot.to_be_bytes();
-        let payload = [
-            Instruction::Store as u8,
-            buffer_id,
-            slot_bytes[0],
-            slot_bytes[1],
-        ];
-
-        let cmd = packet(PacketType::Command, &self.address, &payload);
-        self.uart.write(&cmd).await?;
-
-        let response = self.receive_packet::<1>().await?;
-        let ack_code = Self::ack_packet(&response)?;
-        if ack_code == ConfirmationCode::Ok {
-            Ok(())
-        } else {
-            return Err(FingerError::Sensor(ack_code));
-        }
+        let [sh, sl] = slot.to_be_bytes();
+        self.send_command(&[Instruction::Store as u8, buffer_id, sh, sl]).await
     }
 
     pub async fn create_model(&mut self) -> Result<(), FingerError> {
-        let payload = [0x05];
-        let cmd = packet(PacketType::Command, &self.address, &payload);
-
-        self.uart.write(&cmd).await?;
-
-        let response = self.receive_packet::<1>().await?;
-        let ack_code = Self::ack_packet(&response)?;
-        if ack_code == ConfirmationCode::Ok {
-            Ok(())
-        } else {
-            return Err(FingerError::Sensor(ack_code));
-        }
+        self.send_command(&[Instruction::RegModel as u8]).await
     }
 
     pub fn create_verify_packet(address: &[u8; 4], password: &[u8; 4]) -> [u8; 16] {
@@ -413,7 +364,7 @@ impl<'a> FingerprintSensor<'a> {
         let count_bytes = count.to_be_bytes();
 
         let payload = [
-            0x04,
+            Instruction::Search as u8,
             buffer_id,
             start_bytes[0],
             start_bytes[1],
@@ -432,7 +383,7 @@ impl<'a> FingerprintSensor<'a> {
                 let score = u16::from_be_bytes([response.data[3], response.data[4]]);
                 Ok((page_id, score))
             }
-            ConfirmationCode::NoFinger => Err(FingerError::NoMatch),
+            ConfirmationCode::NotFound => Err(FingerError::NoMatch),
             _ => Err(FingerError::Sensor(ack_code)),
         }
     }
@@ -445,7 +396,7 @@ fn packet<const N: usize>(
 ) -> [u8; N + 11] {
     let mut pkt = [0u8; N + 11];
 
-    let (len, sum) = checksum(packet_type, data);
+    let (len, sum) = compute_checksum(packet_type, data);
 
     pkt[0] = START_CODE_H;
     pkt[1] = START_CODE_L;
@@ -474,7 +425,7 @@ fn split_to_bytes(value: u16) -> (u8, u8) {
     (high_byte, low_byte)
 }
 
-fn checksum(packet_type: PacketType, data: &[u8]) -> (u16, u16) {
+fn compute_checksum(packet_type: PacketType, data: &[u8]) -> (u16, u16) {
     let len = (data.len() + 2) as u16;
     let (len_high_byte, len_low_byte) = split_to_bytes(len);
     let mut sum: u16 = 0;
