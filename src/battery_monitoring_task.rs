@@ -35,8 +35,6 @@ const DELAY: Duration = Duration::from_secs(3600);
 pub async fn battery_monitor_task(mut adc: Adc<'static, ADC1>, mut measure_pin: Peri<'static, PA4>) {
     loop {
         let sample = adc.blocking_read(&mut measure_pin, SampleTime::CYCLES160_5);
-        let voltage = sample as f32 / 4096.0 * V_FULL as f32;
-        info!("Battery: {=f32} V (raw: {=u16})", voltage, sample);
 
         if sample <= V_CRITICAL_LEVEL {
             BEEPER_CHANNEL.send(CRITICAL_LEVEL_SIGNAL).await;
