@@ -1,3 +1,6 @@
+[env]
+DEFMT_LOG = "trace"
+
 [target.thumbv6m-none-eabi]
 runner = "probe-rs run --chip STM32G031K8Tx"
 # Add these rustflags:

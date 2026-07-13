@@ -111,20 +111,16 @@ pub enum ConfirmationCode {
 
 #[derive(Debug)]
 pub enum FingerError {
-    /// 1. Hardware/Communication errors (Timeout, Framing, Overrun)
-    /// This allows us to use '?' on self.uart.read().await
+    /// Hardware/communication error (timeout, framing, overrun).
     Uart(embassy_stm32::usart::Error),
 
-    /// 2. Protocol errors (Invalid Header, Bad Checksum)
-    /// This happens if the data is corrupted during transmission
+    /// Protocol error (invalid header or checksum mismatch).
     Protocol(&'static str),
 
-    /// 3. Sensor Logic errors (The ConfirmationCode sent by the R503)
-    /// This wraps the specific response codes we defined earlier
+    /// Sensor returned a non-Ok confirmation code.
     Sensor(ConfirmationCode),
 
-    /// 4. Unexpected Packet Type
-    /// For example, receiving a Data packet when expecting an Acknowledgment
+    /// Received an unexpected packet type (e.g. Data when expecting Ack).
     UnexpectedPacket(PacketType),
 
     NoFinger,
@@ -361,13 +357,6 @@ impl<'a> FingerprintSensor<'a> {
 
     pub async fn create_model(&mut self) -> Result<(), FingerError> {
         self.send_command(&[Instruction::RegModel as u8]).await
-    }
-
-    pub fn create_verify_packet(address: &[u8; 4], password: &[u8; 4]) -> [u8; 16] {
-        let mut payload = [0u8; 5];
-        payload[0] = Instruction::VfyPwd as u8;
-        payload[1..5].copy_from_slice(password);
-        packet(PacketType::Command, address, &payload)
     }
 
     pub async fn search_database(

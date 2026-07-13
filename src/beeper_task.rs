@@ -1,4 +1,5 @@
-use embassy_stm32::gpio::Output;
+use embassy_stm32::peripherals::TIM14;
+use embassy_stm32::timer::simple_pwm::SimplePwm;
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, signal::Signal,
 };
@@ -15,13 +16,14 @@ pub struct BeeperCommand {
 }
 
 #[embassy_executor::task]
-pub async fn beeper_task(mut beeper_pin: Output<'static>) {
+pub async fn beeper_task(mut pwm: SimplePwm<'static, TIM14>) {
+    pwm.ch1().set_duty_cycle_percent(50);
     loop {
         let cmd = BEEPER_CHANNEL.receive().await;
         for i in 0..cmd.times {
-            beeper_pin.set_high();
+            pwm.ch1().enable();
             Timer::after(cmd.duration).await;
-            beeper_pin.set_low();
+            pwm.ch1().disable();
             if i + 1 < cmd.times {
                 Timer::after(cmd.delay).await;
             }

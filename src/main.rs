@@ -24,7 +24,7 @@ mod fingerprint_task;
 mod unlock_task;
 
 use battery_monitoring_task::battery_monitor_task;
-use beeper_task::beeper_task;
+use beeper_task::beeper_task ;
 use fingerprint_irq_task::fingerprint_irq_task;
 use fingerprint_task::fingerprint_manager_task;
 use unlock_task::unlock_task;
@@ -77,18 +77,21 @@ async fn main(spawner: Spawner) {
     );
 
     spawner.spawn(unlock_task(solenoid_pin).unwrap());
-    // Park forever without occupying a timer-queue slot.
-    core::future::pending::<()>().await;
-
-    //let button_pin = Input::new(p.PB8, Pull::Up);
-    //let add_finger_pin = ExtiInput::new(button_pin, p.EXTI8);
 
     let adc = Adc::new(p.ADC1);
-    let ref_enable_pin = Output::new(p.PB3, Level::Low, Speed::Low);
-    let beeper_pin = Output::new(p.PB9, Level::Low, Speed::Low);
+    let beeper_pwm = SimplePwm::new(
+        p.TIM14,
+        Some(PwmPin::new(p.PA7, OutputType::PushPull)),
+        None,
+        None,
+        None,
+        khz(2),
+        Default::default(),
+    );
 
-    //spawner.spawn(add_new_finger_task(add_finger_pin).unwrap());
+    spawner.spawn(beeper_task(beeper_pwm).unwrap());
+    spawner.spawn(battery_monitor_task(adc, p.PA4).unwrap());
 
-    spawner.spawn(beeper_task(beeper_pin).unwrap());
-    spawner.spawn(battery_monitor_task(adc, p.PA5, ref_enable_pin, p.PA4).unwrap());
+    // Park forever without occupying a timer-queue slot.
+    core::future::pending::<()>().await;
 }

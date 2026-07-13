@@ -1,7 +1,6 @@
 use core::sync::atomic::Ordering;
 
 use defmt::println;
-use embassy_stm32 as _;
 use embassy_stm32::exti::ExtiInput;
 use embassy_stm32::mode::Async;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
