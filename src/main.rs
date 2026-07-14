@@ -39,6 +39,7 @@ const SOLENOID_FREQUENCY: Hertz = khz(10);
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_stm32::init(Default::default());
+
     let button_pin1 = Output::new(p.PA3, Level::High, Speed::Low);
 
     let mut fingerprint_uart_config = embassy_stm32::usart::Config::default();

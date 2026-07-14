@@ -24,7 +24,6 @@ pub async fn fingerprint_irq_task(mut pin: ExtiInput<'static, Async>) {
         match select(pin.wait_for_any_edge(), RESYNC_SIGNAL.wait()).await {
             Either::First(_) => {
                 if pin.is_low() && !state {
-                    defmt::println!("finger on");
                     state = true;
                     sender.send(state);
                 } else if pin.is_high() && !SENSOR_ACTIVE.load(Ordering::Relaxed) {
@@ -33,7 +32,6 @@ pub async fn fingerprint_irq_task(mut pin: ExtiInput<'static, Async>) {
                     // command started while we were waiting.
                     Timer::after_millis(50).await;
                     if pin.is_high() && !SENSOR_ACTIVE.load(Ordering::Relaxed) {
-                        defmt::println!("finger off");
                         state = false;
                         sender.send(state);
                     }
@@ -51,7 +49,6 @@ pub async fn fingerprint_irq_task(mut pin: ExtiInput<'static, Async>) {
                     continue;
                 }
                 let current = pin.is_low();
-                defmt::println!("irq resync: finger={}", current);
                 if current != state {
                     state = current;
                     sender.send(state);

@@ -33,7 +33,7 @@ pub async fn unlock(pwm: &mut SimplePwm<'static, TIM1>) {
     pwm.ch1().enable();
     pwm.ch1().set_duty_cycle_fully_on();
     Timer::after_millis(KICK_MS).await;
-    pwm.ch1().set_duty_cycle_fraction(3, 4);
+    pwm.ch1().set_duty_cycle_fraction(4, 4);
     Timer::after_millis(HOLD_MS).await;
     pwm.ch1().set_duty_cycle_fully_off();
     pwm.ch1().disable();

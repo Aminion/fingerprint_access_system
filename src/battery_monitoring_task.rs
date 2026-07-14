@@ -1,4 +1,3 @@
-use defmt::info;
 use embassy_stm32::adc::{Adc, SampleTime};
 use embassy_stm32::peripherals::{ADC1, PA4};
 use embassy_stm32::Peri;

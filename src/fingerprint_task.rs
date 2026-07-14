@@ -1,6 +1,5 @@
 use core::sync::atomic::Ordering;
 
-use defmt::println;
 use embassy_stm32::exti::ExtiInput;
 use embassy_stm32::mode::Async;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -70,18 +69,15 @@ pub async fn fingerprint_manager_task(mut sensor: FingerprintSensor) {
 
     loop {
         let cmd = FINGERPRINT_CHANNEL.receive().await;
-        println!("receive");
 
         {
             let _g = SensorGuard::new();
-            let _ = sensor.enable().await;
+            sensor.enable().await.ok();
         }
 
         match cmd {
             SensorCommand::ValidateAccess(signal) => {
                 let result: Result<_, FingerError> = async {
-                    // All commands for one validation run under a single guard —
-                    // no finger_on_sensor() calls happen inside this block.
                     let _g = SensorGuard::new();
                     sensor.led(&EFFECT_IN_PROGRESS).await?;
                     sensor.generate_image().await?;
@@ -90,7 +86,6 @@ pub async fn fingerprint_manager_task(mut sensor: FingerprintSensor) {
                     Ok(())
                 }
                 .await;
-
                 signal.signal(result.is_ok());
 
                 if result.is_ok() {
@@ -134,7 +129,6 @@ pub async fn fingerprint_manager_task(mut sensor: FingerprintSensor) {
 
         sensor.disable();
         RESYNC_SIGNAL.signal(());
-        println!("end receive");
     }
 }
 
