@@ -91,7 +91,9 @@ async fn main(spawner: Spawner) {
     );
 
     spawner.spawn(beeper_task(beeper_pwm).unwrap());
-    spawner.spawn(battery_monitor_task(adc, p.PA4).unwrap());
+
+    let shutdown_pin = Output::new(p.PA5, Level::Low, Speed::Low);
+    spawner.spawn(battery_monitor_task(adc, p.PA4, shutdown_pin).unwrap());
 
     // Park forever without occupying a timer-queue slot.
     core::future::pending::<()>().await;

@@ -34,6 +34,8 @@ pub enum Instruction {
     /// Store a template from CharBuffer into a specific Flash location.
     /// Problem: Returns BadLocation if ID is out of bounds.
     Store = 0x06,
+    /// Set a system parameter (e.g. baud rate index, security level).
+    SetSysParam = 0x0E,
     /// Verify the 4-byte system password.
     /// Problem: Required before most other commands can run.
     VfyPwd = 0x13,
@@ -340,6 +342,10 @@ impl<'a> FingerprintSensor<'a> {
         payload[0] = Instruction::VfyPwd as u8;
         payload[1..5].copy_from_slice(&self.password);
         self.send_command(&payload).await
+    }
+
+    pub async fn set_sys_param(&mut self, param: u8, value: u8) -> Result<(), FingerError> {
+        self.send_command(&[Instruction::SetSysParam as u8, param, value]).await
     }
 
     pub async fn generate_image(&mut self) -> Result<(), FingerError> {
