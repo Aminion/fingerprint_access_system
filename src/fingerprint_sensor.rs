@@ -157,6 +157,19 @@ pub struct LedEffect {
     pub cycles: u8,
 }
 
+impl LedEffect {
+    /// How long the animation runs, so a caller can wait it out without
+    /// holding a sensor-command guard across the idle time.
+    /// Zero for effects that hold a steady level (cycles == 0).
+    pub const fn wait_ms(&self) -> u64 {
+        if self.cycles == 0 {
+            0
+        } else {
+            (self.speed as u64 * self.cycles as u64 * 32) + 100
+        }
+    }
+}
+
 pub struct Response<const N: usize> {
     pub address: [u8; 4],
     pub packet_type: PacketType,
@@ -318,11 +331,13 @@ impl<'a> FingerprintSensor<'a> {
         self.transact::<_, 1>(payload).await.map(|_| ())
     }
 
+    /// Note: this keeps the caller inside its command window for the whole
+    /// animation. Where the WAKE pin must stay observable meanwhile, call
+    /// `led()` under the guard and wait `effect.wait_ms()` outside it.
     pub async fn led_await(&mut self, effect: &LedEffect) -> Result<(), FingerError> {
         let result = self.led(effect).await;
-        if effect.cycles > 0 && result.is_ok() {
-            let wait_ms = (effect.speed as u32 * effect.cycles as u32 * 32) + 100;
-            Timer::after_millis(wait_ms as u64).await;
+        if result.is_ok() && effect.wait_ms() > 0 {
+            Timer::after_millis(effect.wait_ms()).await;
         }
         result
     }
