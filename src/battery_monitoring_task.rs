@@ -11,20 +11,25 @@ static CRITICAL_SHUTDOWN_DONE: Signal<CriticalSectionRawMutex, ()> = Signal::new
 
 // NI-MH 4S
 const BAT_COUNT: u32 = 4;
-const V_FULL_MV: u32 = BAT_COUNT * 1200;
 const V_LOW_MV: u32 = BAT_COUNT * 1100;
 const V_CRITICAL_MV: u32 = BAT_COUNT * 1000;
 
 const ADC_MAX: u32 = 4095;
-// RV1 is trimmed so that a full battery (V_FULL_MV) gives this voltage on BAT_SENSE.
-const SENSE_AT_FULL_MV: u32 = 3300;
+// RV1 is trimmed so that a battery at V_CAL_MV gives SENSE_AT_CAL_MV on BAT_SENSE.
+const V_CAL_MV: u32 = 5500;
+const SENSE_AT_CAL_MV: u32 = 3200;
+
+// Readings per measurement. Both channels are summed over the same count, so the
+// ratio of sums equals the ratio of averages and no averaging division is needed.
+const SAMPLES: u32 = 16;
 
 // VREF+ is bonded to VDD on LQFP32, so the ADC full scale follows the 3V3 rail.
 // Measure VDDA against VREFINT (factory-calibrated at VDDA = 3.0 V) instead of assuming it.
-fn battery_mv(sample: u16, vrefint_sample: u16, vrefint_cal: u16) -> u32 {
-    let vdda_mv = VREF_CALIB_MV * vrefint_cal as u32 / (vrefint_sample as u32).max(1);
-    let sense_mv = vdda_mv * sample as u32 / ADC_MAX;
-    sense_mv * V_FULL_MV / SENSE_AT_FULL_MV
+// Computed in one u64 division so intermediate results are not truncated.
+fn battery_mv(sample_sum: u32, vrefint_sum: u32, vrefint_cal: u16) -> u32 {
+    let num = VREF_CALIB_MV as u64 * vrefint_cal as u64 * sample_sum as u64 * V_CAL_MV as u64;
+    let den = (vrefint_sum as u64).max(1) * ADC_MAX as u64 * SENSE_AT_CAL_MV as u64;
+    (num / den) as u32
 }
 
 const LOW_LEVEL_SIGNAL: BeeperCommand = BeeperCommand {
@@ -54,21 +59,24 @@ pub async fn battery_monitor_task(
     let vrefint_cal = vrefint.calibrated_value();
 
     loop {
+        // Interleaved so slow VDDA drift affects both sums equally.
         // CYCLES160_5 also covers VREFINT's 4 µs minimum sampling time.
-        let vrefint_sample = adc.blocking_read(&mut vrefint, SampleTime::CYCLES160_5);
-        let sample = adc.blocking_read(&mut measure_pin, SampleTime::CYCLES160_5);
-        let bat_mv = battery_mv(sample, vrefint_sample, vrefint_cal);
+        let mut vrefint_sum = 0u32;
+        let mut sample_sum = 0u32;
+        for _ in 0..SAMPLES {
+            vrefint_sum += adc.blocking_read(&mut vrefint, SampleTime::CYCLES160_5) as u32;
+            sample_sum += adc.blocking_read(&mut measure_pin, SampleTime::CYCLES160_5) as u32;
+        }
+
+        let bat_mv = battery_mv(sample_sum, vrefint_sum, vrefint_cal);
 
         if bat_mv <= V_CRITICAL_MV {
             BEEPER_CHANNEL.send(CRITICAL_LEVEL_SIGNAL).await;
             CRITICAL_SHUTDOWN_DONE.wait().await;
             shutdown_pin.set_high();
-
         } else if bat_mv <= V_LOW_MV {
             BEEPER_CHANNEL.send(LOW_LEVEL_SIGNAL).await;
         }
-         
-
         Timer::after(DELAY).await;
     }
 }
