@@ -1,9 +1,9 @@
 use embassy_stm32::peripherals::TIM14;
 use embassy_stm32::timer::simple_pwm::SimplePwm;
-use embassy_sync::{
-    blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, signal::Signal,
-};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
 use embassy_time::{Duration, Timer};
+
+use crate::request::Reply;
 
 pub static BEEPER_CHANNEL: Channel<CriticalSectionRawMutex, BeeperCommand, 1> = Channel::new();
 
@@ -12,7 +12,7 @@ pub struct BeeperCommand {
     pub duration: Duration,
     pub delay: Duration,
     pub times: u8,
-    pub done: Option<&'static Signal<CriticalSectionRawMutex, ()>>,
+    pub done: Option<Reply<()>>,
 }
 
 #[embassy_executor::task]

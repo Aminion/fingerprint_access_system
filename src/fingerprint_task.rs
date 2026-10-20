@@ -5,20 +5,21 @@ use embassy_stm32::mode::Async;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::signal::Signal;
-use embassy_time::Timer;
+use embassy_time::{Duration, Timer};
 use crate::fingerprint_irq_task::{FINGERPRINT_IRQ_STATUS, RESYNC_SIGNAL, SENSOR_ACTIVE};
 use crate::fingerprint_sensor::{
     ConfirmationCode, FingerError, GenImg, Img2Tz, LedColor, LedEffect, LedMode, RegModel, Search, Store,
     LIBRARY_CAPACITY,
 };
+use crate::request::{request, Reply};
 use crate::FingerprintSensor;
 
 pub static FINGERPRINT_CHANNEL: Channel<CriticalSectionRawMutex, SensorCommand, 1> = Channel::new();
 
 #[derive(Clone, Copy)]
 pub enum SensorCommand {
-    ValidateAccess(&'static Signal<CriticalSectionRawMutex, bool>),
-    EnrollNewUser(&'static Signal<CriticalSectionRawMutex, ()>),
+    ValidateAccess(Reply<bool>),
+    EnrollNewUser(Reply<()>),
 }
 
 static EFFECT_IN_PROGRESS: LedEffect = LedEffect {
@@ -46,7 +47,7 @@ static EFFECT_FAIL: LedEffect = LedEffect {
 const MAX_VALIDATE_ATTEMPTS: u8 = 5;
 /// Pause between attempts: gives the user time to reposition and keeps a failed
 /// scan from spinning the UART flat out on battery.
-const VALIDATE_RETRY_DELAY_MS: u64 = 300;
+const VALIDATE_RETRY_DELAY: Duration = Duration::from_millis(300);
 
 /// RAII guard that marks a sensor command window.
 /// Sets SENSOR_ACTIVE on creation and clears it + triggers an IRQ resync on drop,
@@ -82,12 +83,7 @@ impl CommandWindow for FingerprintSensor {
 
 async fn finger_on_sensor(expected_state: bool) {
     let mut receiver = FINGERPRINT_IRQ_STATUS.receiver().expect("FINGERPRINT_IRQ_STATUS: all receiver slots taken");
-    loop {
-        if receiver.get().await == expected_state {
-            return;
-        }
-        receiver.changed().await;
-    }
+    receiver.get_and(|&on| on == expected_state).await;
 }
 
 #[embassy_executor::task]
@@ -112,7 +108,7 @@ pub async fn fingerprint_manager_task(mut sensor: FingerprintSensor) {
     }
 }
 
-async fn validate_access(sensor: &mut FingerprintSensor, signal: &Signal<CriticalSectionRawMutex, bool>) {
+async fn validate_access(sensor: &mut FingerprintSensor, signal: Reply<bool>) {
     // AlwaysOn with cycles: 0 — set once, stays lit across retries.
     sensor.window(async |s| s.run(EFFECT_IN_PROGRESS).await.ok()).await;
 
@@ -128,7 +124,7 @@ async fn validate_access(sensor: &mut FingerprintSensor, signal: &Signal<Critica
     // transition, would never re-arm and the press is lost.
     let effect = if matched { EFFECT_SUCCESS } else { EFFECT_FAIL };
     sensor.window(async |s| s.run(effect).await.ok()).await;
-    Timer::after_millis(effect.wait_ms()).await;
+    Timer::after(effect.duration()).await;
 }
 
 /// Scans until a match, the finger is lifted, or attempts run out.
@@ -154,7 +150,7 @@ async fn scan_and_match(sensor: &mut FingerprintSensor) -> bool {
             Err(FingerError::Sensor(ConfirmationCode::NoFinger)) => return false,
             // Still on the sensor but unusable (NoMatch, ImageMessy,
             // FeatureFail) or a transient bus error — scan again.
-            Err(_) if attempt < MAX_VALIDATE_ATTEMPTS => Timer::after_millis(VALIDATE_RETRY_DELAY_MS).await,
+            Err(_) if attempt < MAX_VALIDATE_ATTEMPTS => Timer::after(VALIDATE_RETRY_DELAY).await,
             Err(_) => {}
         }
     }
@@ -196,9 +192,6 @@ pub async fn add_new_finger_task(mut pin: ExtiInput<'static, Async>) {
     loop {
         pin.wait_for_low().await;
 
-        FINGERPRINT_CHANNEL
-            .send(SensorCommand::EnrollNewUser(&DONE))
-            .await;
-        DONE.wait().await;
+        request(&FINGERPRINT_CHANNEL, &DONE, SensorCommand::EnrollNewUser).await;
     }
 }

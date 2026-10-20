@@ -167,11 +167,11 @@ impl LedEffect {
     /// How long the animation runs, so a caller can wait it out without
     /// holding a sensor-command guard across the idle time.
     /// Zero for effects that hold a steady level (cycles == 0).
-    pub const fn wait_ms(&self) -> u64 {
+    pub const fn duration(&self) -> Duration {
         if self.cycles == 0 {
-            0
+            Duration::from_ticks(0)
         } else {
-            (self.speed as u64 * self.cycles as u64 * 32) + 100
+            Duration::from_millis((self.speed as u64 * self.cycles as u64 * 32) + 100)
         }
     }
 }
@@ -467,10 +467,10 @@ impl<'a> FingerprintSensor<'a> {
 
     /// Note: this keeps the caller inside its command window for the whole
     /// animation. Where the WAKE pin must stay observable meanwhile, run the
-    /// effect under the guard and wait `effect.wait_ms()` outside it.
+    /// effect under the guard and wait `effect.duration()` outside it.
     pub async fn led_await(&mut self, effect: LedEffect) -> Result<(), FingerError> {
         self.run(effect).await?;
-        Timer::after_millis(effect.wait_ms()).await;
+        Timer::after(effect.duration()).await;
         Ok(())
     }
 

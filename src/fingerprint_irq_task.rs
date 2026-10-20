@@ -6,7 +6,7 @@ use embassy_stm32::mode::Async;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 use embassy_sync::watch::Watch;
-use embassy_time::Timer;
+use embassy_time::{Duration, Timer};
 
 pub static FINGERPRINT_IRQ_STATUS: Watch<CriticalSectionRawMutex, bool, 2> = Watch::new();
 /// Set true while a sensor UART command is in flight; the IRQ task ignores
@@ -15,6 +15,11 @@ pub static SENSOR_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Pulsed after SENSOR_ACTIVE is cleared so the IRQ task re-reads the pin
 /// and publishes the authoritative finger presence state.
 pub static RESYNC_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+
+/// How long a HIGH level must hold before it counts as finger-off.
+const DEBOUNCE: Duration = Duration::from_millis(50);
+/// Settling time after a command window closes or the sensor powers down.
+const SETTLE: Duration = Duration::from_millis(10);
 
 #[embassy_executor::task]
 pub async fn fingerprint_irq_task(mut pin: ExtiInput<'static, Async>) {
@@ -30,7 +35,7 @@ pub async fn fingerprint_irq_task(mut pin: ExtiInput<'static, Async>) {
                     // Only treat a HIGH edge as finger-off when the sensor is idle.
                     // Re-check after debounce; also re-check the flag in case a new
                     // command started while we were waiting.
-                    Timer::after_millis(50).await;
+                    Timer::after(DEBOUNCE).await;
                     if pin.is_high() && !SENSOR_ACTIVE.load(Ordering::Relaxed) {
                         state = false;
                         sender.send(state);
@@ -41,7 +46,7 @@ pub async fn fingerprint_irq_task(mut pin: ExtiInput<'static, Async>) {
             Either::Second(_) => {
                 // Give the pin a moment to settle after a sensor command finishes
                 // or the sensor is powered down.
-                Timer::after_millis(10).await;
+                Timer::after(SETTLE).await;
                 if SENSOR_ACTIVE.load(Ordering::Relaxed) {
                     // A new command window opened while we waited — the pin may be
                     // glitching again. Skip; that window's guard drop will re-fire

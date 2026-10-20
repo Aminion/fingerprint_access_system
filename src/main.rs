@@ -19,6 +19,7 @@ mod beeper_task;
 mod fingerprint_irq_task;
 mod fingerprint_sensor;
 mod fingerprint_task;
+mod request;
 mod unlock_task;
 
 use battery_monitoring_task::battery_monitor_task;

@@ -6,6 +6,7 @@ use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal}
 use embassy_time::{Duration, Timer};
 
 use crate::beeper_task::{BeeperCommand, BEEPER_CHANNEL};
+use crate::request::request;
 
 static CRITICAL_SHUTDOWN_DONE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
@@ -33,17 +34,17 @@ fn battery_mv(sample_sum: u32, vrefint_sum: u32, vrefint_cal: u16) -> u32 {
 }
 
 const LOW_LEVEL_SIGNAL: BeeperCommand = BeeperCommand {
-    duration: embassy_time::Duration::from_millis(500),
-    delay: embassy_time::Duration::from_millis(0),
+    duration: Duration::from_millis(500),
+    delay: Duration::from_millis(0),
     times: 1,
     done: None,
 };
 
 const CRITICAL_LEVEL_SIGNAL: BeeperCommand = BeeperCommand {
-    duration: embassy_time::Duration::from_millis(500),
-    delay: embassy_time::Duration::from_millis(100),
+    duration: Duration::from_millis(500),
+    delay: Duration::from_millis(100),
     times: 3,
-    done: Some(&CRITICAL_SHUTDOWN_DONE),
+    done: None,
 };
 
 const DELAY: Duration = Duration::from_secs(3600);
@@ -71,8 +72,12 @@ pub async fn battery_monitor_task(
         let bat_mv = battery_mv(sample_sum, vrefint_sum, vrefint_cal);
 
         if bat_mv <= V_CRITICAL_MV {
-            BEEPER_CHANNEL.send(CRITICAL_LEVEL_SIGNAL).await;
-            CRITICAL_SHUTDOWN_DONE.wait().await;
+            // Cut power only after the last beep has finished.
+            request(&BEEPER_CHANNEL, &CRITICAL_SHUTDOWN_DONE, |done| BeeperCommand {
+                done: Some(done),
+                ..CRITICAL_LEVEL_SIGNAL
+            })
+            .await;
             shutdown_pin.set_high();
         } else if bat_mv <= V_LOW_MV {
             BEEPER_CHANNEL.send(LOW_LEVEL_SIGNAL).await;
