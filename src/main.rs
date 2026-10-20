@@ -1,8 +1,6 @@
 #![no_std]
 #![no_main]
-#![feature(generic_const_exprs)]
 #![feature(impl_trait_in_assoc_type)]
-#![allow(incomplete_features)]
 
 use embassy_executor::Spawner;
 use embassy_stm32 as _;
