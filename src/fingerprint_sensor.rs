@@ -12,6 +12,8 @@ pub const START_CODE: u16 = 0xEF01;
 const POWER_UP_BYTE: u8 = 0x55;
 const ENABLE_TIMEOUT: Duration = Duration::from_millis(2000);
 const PACKET_TIMEOUT: Duration = Duration::from_millis(1000);
+/// Template slots in the sensor's Flash library (PageID 0..LIBRARY_CAPACITY).
+pub const LIBRARY_CAPACITY: u16 = 200;
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
@@ -39,6 +41,8 @@ pub enum Instruction {
     /// Verify the 4-byte system password.
     /// Problem: Required before most other commands can run.
     VfyPwd = 0x13,
+    /// Read the 256-slot occupancy bitmap for one index page (32 bytes).
+    ReadIndexTable = 0x1F,
     /// Configure the LED indicator (color, speed, mode).
     /// Problem: Returns InvalidReg if parameters are out of range.
     AuraConfig = 0x35,
@@ -128,6 +132,8 @@ pub enum FingerError {
     NoFinger,
     NoMatch,
     Timeout,
+    /// Every library slot already holds a template.
+    LibraryFull,
 }
 
 #[repr(u8)]
@@ -374,6 +380,23 @@ impl<'a> FingerprintSensor<'a> {
     pub async fn store_template(&mut self, buffer_id: u8, slot: u16) -> Result<(), FingerError> {
         let [sh, sl] = slot.to_be_bytes();
         self.send_command(&[Instruction::Store as u8, buffer_id, sh, sl]).await
+    }
+
+    /// Occupancy bitmap for slots page*256 .. page*256+255:
+    /// slot n is bit (n % 8) of byte (n / 8), set when the slot holds a template.
+    pub async fn read_index_table(&mut self, page: u8) -> Result<[u8; 32], FingerError> {
+        let data = self.transact::<_, 33>(&[Instruction::ReadIndexTable as u8, page]).await?;
+        let mut table = [0u8; 32];
+        table.copy_from_slice(&data[1..]);
+        Ok(table)
+    }
+
+    /// Lowest empty library slot.
+    pub async fn find_free_slot(&mut self) -> Result<u16, FingerError> {
+        let table = self.read_index_table(0).await?;
+        (0..LIBRARY_CAPACITY)
+            .find(|&slot| table[slot as usize / 8] & (1 << (slot % 8)) == 0)
+            .ok_or(FingerError::LibraryFull)
     }
 
     pub async fn create_model(&mut self) -> Result<(), FingerError> {

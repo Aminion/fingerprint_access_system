@@ -7,7 +7,7 @@ use embassy_sync::channel::Channel;
 use embassy_sync::signal::Signal;
 use embassy_time::Timer;
 use crate::fingerprint_irq_task::{FINGERPRINT_IRQ_STATUS, RESYNC_SIGNAL, SENSOR_ACTIVE};
-use crate::fingerprint_sensor::{ConfirmationCode, FingerError, LedColor, LedEffect, LedMode};
+use crate::fingerprint_sensor::{ConfirmationCode, FingerError, LedColor, LedEffect, LedMode, LIBRARY_CAPACITY};
 use crate::FingerprintSensor;
 
 pub static FINGERPRINT_CHANNEL: Channel<CriticalSectionRawMutex, SensorCommand, 1> = Channel::new();
@@ -95,7 +95,7 @@ pub async fn fingerprint_manager_task(mut sensor: FingerprintSensor) {
                         let _g = SensorGuard::new();
                         sensor.generate_image().await?;
                         sensor.image_to_template(1).await?;
-                        sensor.search_database(1, 0, 200).await?;
+                        sensor.search_database(1, 0, LIBRARY_CAPACITY).await?;
                         Ok(())
                     }
                     .await;
@@ -135,6 +135,9 @@ pub async fn fingerprint_manager_task(mut sensor: FingerprintSensor) {
 
             SensorCommand::EnrollNewUser(signal) => loop {
                 let result: Result<_, FingerError> = async {
+                    // Pick the slot before scanning so a full library fails
+                    // without making the user press twice for nothing.
+                    let slot = { let _g = SensorGuard::new(); sensor.find_free_slot().await? };
                     for i in 1..=2u8 {
                         // Command window — WAKE glitches suppressed.
                         { let _g = SensorGuard::new(); sensor.led(&EFFECT_IN_PROGRESS).await?; }
@@ -148,7 +151,7 @@ pub async fn fingerprint_manager_task(mut sensor: FingerprintSensor) {
                         finger_on_sensor(false).await;
                     }
                     { let _g = SensorGuard::new(); sensor.create_model().await?; }
-                    { let _g = SensorGuard::new(); sensor.store_template(1, 1).await?; }
+                    { let _g = SensorGuard::new(); sensor.store_template(1, slot).await?; }
                     Ok(())
                 }
                 .await;
