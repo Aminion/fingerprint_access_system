@@ -8,7 +8,7 @@ use embassy_stm32::adc::Adc;
 use embassy_stm32::exti::ExtiInput;
 use embassy_stm32::gpio::{Level, Output, Pull, Speed, OutputType};
 use embassy_stm32::time::{khz, Hertz};
-use embassy_stm32::timer::simple_pwm::{PwmPin, SimplePwm};
+use embassy_stm32::timer::simple_pwm::{PwmPin, PwmPinConfig, SimplePwm};
 use embassy_stm32::usart::Uart;
 use {defmt_rtt as _, panic_probe as _};
 
@@ -31,6 +31,14 @@ const SENSOR_ADDRESS: [u8; 4] = [0xFF, 0xFF, 0xFF, 0xFF];
 const SENSOR_PASSWORD: [u8; 4] = [0x00, 0x00, 0x00, 0x00];
 const SENSOR_BAUDRATE: u32 = 57600;
 const SOLENOID_FREQUENCY: Hertz = khz(10);
+
+// A disabled timer channel stops driving its pin, which would leave the
+// driver transistor's base floating between beeps/unlocks; hold it low.
+const PWM_PIN_CONFIG: PwmPinConfig = PwmPinConfig {
+    output_type: OutputType::PushPull,
+    speed: Speed::Low,
+    pull: Pull::Down,
+};
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -65,7 +73,7 @@ async fn main(spawner: Spawner) {
     spawner.spawn(fingerprint_manager_task(sensor, fingerprint_wake_pin).unwrap());
     let solenoid_pin = SimplePwm::new(
         p.TIM1,
-        Some(PwmPin::new(p.PA8, OutputType::PushPull)), // PA8 is Channel 1
+        Some(PwmPin::new_with_config(p.PA8, PWM_PIN_CONFIG)), // PA8 is Channel 1
         None,
         None,
         None,
@@ -78,7 +86,7 @@ async fn main(spawner: Spawner) {
     let adc = Adc::new(p.ADC1);
     let beeper_pwm = SimplePwm::new(
         p.TIM14,
-        Some(PwmPin::new(p.PA7, OutputType::PushPull)),
+        Some(PwmPin::new_with_config(p.PA7, PWM_PIN_CONFIG)),
         None,
         None,
         None,
