@@ -12,11 +12,9 @@ use embassy_stm32::timer::simple_pwm::{PwmPin, SimplePwm};
 use embassy_stm32::usart::Uart;
 use {defmt_rtt as _, panic_probe as _};
 
-use crate::fingerprint_irq_task::FINGERPRINT_IRQ_STATUS;
 use crate::fingerprint_sensor::Irqs;
 mod battery_monitoring_task;
 mod beeper_task;
-mod fingerprint_irq_task;
 mod fingerprint_sensor;
 mod fingerprint_task;
 mod request;
@@ -24,7 +22,6 @@ mod unlock_task;
 
 use battery_monitoring_task::battery_monitor_task;
 use beeper_task::beeper_task ;
-use fingerprint_irq_task::fingerprint_irq_task;
 use fingerprint_task::fingerprint_manager_task;
 use unlock_task::unlock_task;
 
@@ -62,10 +59,10 @@ async fn main(spawner: Spawner) {
         fingerprint_uart,
     );
 
-    FINGERPRINT_IRQ_STATUS.sender().send(false);
-    let fingerprint_irq_pin = ExtiInput::new(p.PA2, p.EXTI2, Pull::Up, Irqs);
-    spawner.spawn(fingerprint_manager_task(sensor).unwrap());
-    spawner.spawn(fingerprint_irq_task(fingerprint_irq_pin).unwrap());
+    // WAKE is driven both ways by the sensor; an internal pull-up fights its
+    // weak low and leaves it at ~0.8 V, right at the input threshold.
+    let fingerprint_wake_pin = ExtiInput::new(p.PA2, p.EXTI2, Pull::None, Irqs);
+    spawner.spawn(fingerprint_manager_task(sensor, fingerprint_wake_pin).unwrap());
     let solenoid_pin = SimplePwm::new(
         p.TIM1,
         Some(PwmPin::new(p.PA8, OutputType::PushPull)), // PA8 is Channel 1

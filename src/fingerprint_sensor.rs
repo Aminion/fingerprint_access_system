@@ -164,8 +164,7 @@ pub struct LedEffect {
 }
 
 impl LedEffect {
-    /// How long the animation runs, so a caller can wait it out without
-    /// holding a sensor-command guard across the idle time.
+    /// How long the animation runs.
     /// Zero for effects that hold a steady level (cycles == 0).
     pub const fn duration(&self) -> Duration {
         if self.cycles == 0 {
@@ -465,9 +464,7 @@ impl<'a> FingerprintSensor<'a> {
         Ok(Frame { packet_type, body, len })
     }
 
-    /// Note: this keeps the caller inside its command window for the whole
-    /// animation. Where the WAKE pin must stay observable meanwhile, run the
-    /// effect under the guard and wait `effect.duration()` outside it.
+    /// Runs `effect` and waits for the animation to finish.
     pub async fn led_await(&mut self, effect: LedEffect) -> Result<(), FingerError> {
         self.run(effect).await?;
         Timer::after(effect.duration()).await;

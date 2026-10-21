@@ -1,24 +1,22 @@
-use core::sync::atomic::Ordering;
-
+use embassy_futures::select::{select, Either};
 use embassy_stm32::exti::ExtiInput;
 use embassy_stm32::mode::Async;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::signal::Signal;
-use embassy_time::{Duration, Timer};
-use crate::fingerprint_irq_task::{FINGERPRINT_IRQ_STATUS, RESYNC_SIGNAL, SENSOR_ACTIVE};
+use embassy_time::{Duration, Instant, Timer};
 use crate::fingerprint_sensor::{
     ConfirmationCode, FingerError, GenImg, Img2Tz, LedColor, LedEffect, LedMode, RegModel, Search, Store,
     LIBRARY_CAPACITY,
 };
 use crate::request::{request, Reply};
+use crate::unlock_task::UNLOCK_SIGNAL;
 use crate::FingerprintSensor;
 
 pub static FINGERPRINT_CHANNEL: Channel<CriticalSectionRawMutex, SensorCommand, 1> = Channel::new();
 
 #[derive(Clone, Copy)]
 pub enum SensorCommand {
-    ValidateAccess(Reply<bool>),
     EnrollNewUser(Reply<()>),
 }
 
@@ -41,149 +39,146 @@ static EFFECT_FAIL: LedEffect = LedEffect {
     cycles: 0x3,
 };
 
-/// Scan attempts allowed per presence event before giving up. Bounded so a
-/// finger parked on the sensor can't wedge unlock_task, which stays blocked on
-/// the result signal for the whole window.
+/// Scan attempts allowed per press before giving up.
 const MAX_VALIDATE_ATTEMPTS: u8 = 5;
 /// Pause between attempts: gives the user time to reposition and keeps a failed
 /// scan from spinning the UART flat out on battery.
 const VALIDATE_RETRY_DELAY: Duration = Duration::from_millis(300);
+/// Interval between GenImg presence polls.
+const PRESENCE_POLL: Duration = Duration::from_millis(100);
 
-/// RAII guard that marks a sensor command window.
-/// Sets SENSOR_ACTIVE on creation and clears it + triggers an IRQ resync on drop,
-/// so the IRQ task ignores WAKE pin glitches while any sensor command is in flight.
-struct SensorGuard;
-
-impl SensorGuard {
-    fn new() -> Self {
-        SENSOR_ACTIVE.store(true, Ordering::Relaxed);
-        SensorGuard
-    }
-}
-
-impl Drop for SensorGuard {
-    fn drop(&mut self) {
-        SENSOR_ACTIVE.store(false, Ordering::Relaxed);
-        RESYNC_SIGNAL.signal(());
-    }
-}
-
-trait CommandWindow {
-    /// Runs `f` inside a sensor command window. The window closes when `f`
-    /// completes, fails, or the future is cancelled.
-    async fn window<T>(&mut self, f: impl AsyncFnOnce(&mut Self) -> T) -> T;
-}
-
-impl CommandWindow for FingerprintSensor {
-    async fn window<T>(&mut self, f: impl AsyncFnOnce(&mut Self) -> T) -> T {
-        let _g = SensorGuard::new();
-        f(self).await
-    }
-}
-
-async fn finger_on_sensor(expected_state: bool) {
-    let mut receiver = FINGERPRINT_IRQ_STATUS.receiver().expect("FINGERPRINT_IRQ_STATUS: all receiver slots taken");
-    receiver.get_and(|&on| on == expected_state).await;
-}
-
+/// Owns the sensor and its WAKE pin.
+///
+/// WAKE is trusted only for the press, and only while the sensor is powered
+/// down: powered, the sensor toggles it on its own (docs/wake-pin.md). While
+/// powered, presence comes from GenImg instead, and every flow ends with the
+/// finger confirmed off before power-down.
 #[embassy_executor::task]
-pub async fn fingerprint_manager_task(mut sensor: FingerprintSensor) {
+pub async fn fingerprint_manager_task(mut sensor: FingerprintSensor, mut wake: ExtiInput<'static, Async>) {
     loop {
-        let cmd = FINGERPRINT_CHANNEL.receive().await;
-        sensor.window(async |s| s.enable().await.ok()).await;
+        // Re-arm on release: WAKE can stay low with nothing GenImg can image
+        // (wet glass, a flow that bailed on a bus error); a bare level wait
+        // would then re-run validate back to back and never let the sensor sleep.
+        let press = async {
+            wake.wait_for_high().await;
+            wake.wait_for_low().await
+        };
+        let cmd = select(press, FINGERPRINT_CHANNEL.receive()).await;
+        sensor.enable().await.ok();
 
         match cmd {
-            SensorCommand::ValidateAccess(signal) => validate_access(&mut sensor, signal).await,
-            SensorCommand::EnrollNewUser(signal) => {
+            Either::First(()) => validate_access(&mut sensor).await,
+            Either::Second(SensorCommand::EnrollNewUser(signal)) => {
                 // Retry without signaling — the caller stays blocked until success.
-                while enroll(&mut sensor).await.is_err() {}
-                sensor.window(async |s| s.led_await(EFFECT_SUCCESS).await.ok()).await;
-                finger_on_sensor(false).await;
+                // A failed attempt needs a fresh placement, not the same one again.
+                while enroll(&mut sensor).await.is_err() {
+                    wait_lift(&mut sensor).await;
+                }
+                sensor.led_await(EFFECT_SUCCESS).await.ok();
                 signal.signal(());
             }
         }
 
         sensor.disable();
-        RESYNC_SIGNAL.signal(());
     }
 }
 
-async fn validate_access(sensor: &mut FingerprintSensor, signal: Reply<bool>) {
+async fn validate_access(sensor: &mut FingerprintSensor) {
     // AlwaysOn with cycles: 0 — set once, stays lit across retries.
-    sensor.window(async |s| s.run(EFFECT_IN_PROGRESS).await.ok()).await;
+    sensor.run(EFFECT_IN_PROGRESS).await.ok();
 
-    let matched = scan_and_match(sensor).await;
-    signal.signal(matched);
+    let effect = match scan_and_match(sensor).await {
+        Scan::Match => {
+            UNLOCK_SIGNAL.signal(());
+            EFFECT_SUCCESS
+        }
+        Scan::NoMatch => EFFECT_FAIL,
+        // Gone before a single image: too short a touch, or a stray WAKE low.
+        Scan::NoFinger => {
+            defmt::info!("wake without finger");
+            return;
+        }
+    };
+    show_until_lift(sensor, effect).await;
+}
 
-    // Send the effect inside a command window, then wait it out
-    // *outside* one. Holding the guard across the animation would
-    // blind the IRQ task to a lift-and-press during those seconds:
-    // the lift is suppressed as a glitch, the press produces no
-    // edge (state is already true), and the resync that follows
-    // sees no change — so unlock_task, waiting on a false->true
-    // transition, would never re-arm and the press is lost.
-    let effect = if matched { EFFECT_SUCCESS } else { EFFECT_FAIL };
-    sensor.window(async |s| s.run(effect).await.ok()).await;
-    Timer::after(effect.duration()).await;
+enum Scan {
+    Match,
+    NoMatch,
+    NoFinger,
 }
 
 /// Scans until a match, the finger is lifted, or attempts run out.
-async fn scan_and_match(sensor: &mut FingerprintSensor) -> bool {
+async fn scan_and_match(sensor: &mut FingerprintSensor) -> Scan {
     for attempt in 1..=MAX_VALIDATE_ATTEMPTS {
-        let result = sensor
-            .window(async |s| -> Result<_, FingerError> {
-                s.run(GenImg).await?;
-                s.run(Img2Tz(1)).await?;
-                s.run(Search { buffer: 1, start: 0, count: LIBRARY_CAPACITY }).await
-            })
-            .await;
+        let result = async {
+            sensor.run(GenImg).await?;
+            sensor.run(Img2Tz(1)).await?;
+            sensor.run(Search { buffer: 1, start: 0, count: LIBRARY_CAPACITY }).await
+        }
+        .await;
 
         match result {
             Ok(m) => {
                 defmt::info!("fingerprint match: slot {} score {}", m.slot, m.score);
-                return true;
+                return Scan::Match;
             }
-            // The sensor is the presence oracle: GenImg answers
-            // NoFinger once the finger is lifted. The WAKE pin can't
-            // serve here — SENSOR_ACTIVE deliberately suppresses its
-            // HIGH edges for the whole command window.
-            Err(FingerError::Sensor(ConfirmationCode::NoFinger)) => return false,
+            Err(FingerError::Sensor(ConfirmationCode::NoFinger)) if attempt == 1 => return Scan::NoFinger,
+            Err(FingerError::Sensor(ConfirmationCode::NoFinger)) => return Scan::NoMatch,
             // Still on the sensor but unusable (NoMatch, ImageMessy,
             // FeatureFail) or a transient bus error — scan again.
             Err(_) if attempt < MAX_VALIDATE_ATTEMPTS => Timer::after(VALIDATE_RETRY_DELAY).await,
             Err(_) => {}
         }
     }
-    false
+    Scan::NoMatch
+}
+
+/// Starts `effect` and returns once the finger is off and the animation has
+/// played out, so powering down neither cuts it short nor leaves a finger on.
+async fn show_until_lift(sensor: &mut FingerprintSensor, effect: LedEffect) {
+    let end = Instant::now() + effect.duration();
+    sensor.run(effect).await.ok();
+    wait_lift(sensor).await;
+    Timer::at(end).await;
+}
+
+/// Polls GenImg until a finger is on and its image captured.
+async fn capture(sensor: &mut FingerprintSensor) -> Result<(), FingerError> {
+    loop {
+        match sensor.run(GenImg).await {
+            // NoFinger, or on but the image failed — keep polling.
+            Err(FingerError::Sensor(_)) => Timer::after(PRESENCE_POLL).await,
+            other => return other,
+        }
+    }
+}
+
+/// Polls GenImg until the sensor reports no finger. Gives up on a bus error
+/// rather than spinning on a dead sensor.
+async fn wait_lift(sensor: &mut FingerprintSensor) {
+    loop {
+        match sensor.run(GenImg).await {
+            Err(FingerError::Sensor(ConfirmationCode::NoFinger)) => return,
+            Ok(()) | Err(FingerError::Sensor(_)) => Timer::after(PRESENCE_POLL).await,
+            Err(_) => return,
+        }
+    }
 }
 
 async fn enroll(sensor: &mut FingerprintSensor) -> Result<(), FingerError> {
     // Pick the slot before scanning so a full library fails
     // without making the user press twice for nothing.
-    let slot = sensor.window(async |s| s.find_free_slot().await).await?;
+    let slot = sensor.find_free_slot().await?;
     for i in 1..=2u8 {
-        // Command window — WAKE glitches suppressed.
-        sensor.window(async |s| s.run(EFFECT_IN_PROGRESS).await).await?;
-        // IRQ active here: finger_on_sensor() can observe real pin state.
-        finger_on_sensor(true).await;
-        // Command window for scan — the critical glitch zone.
-        sensor
-            .window(async |s| {
-                s.run(GenImg).await?;
-                s.run(Img2Tz(i)).await
-            })
-            .await?;
-        // Command window for LED feedback.
-        sensor.window(async |s| s.run(EFFECT_SUCCESS).await).await?;
-        // IRQ active here: wait for finger removal.
-        finger_on_sensor(false).await;
+        sensor.run(EFFECT_IN_PROGRESS).await?;
+        capture(sensor).await?;
+        sensor.run(Img2Tz(i)).await?;
+        sensor.run(EFFECT_SUCCESS).await?;
+        wait_lift(sensor).await;
     }
-    sensor
-        .window(async |s| {
-            s.run(RegModel).await?;
-            s.run(Store { buffer: 1, slot }).await
-        })
-        .await
+    sensor.run(RegModel).await?;
+    sensor.run(Store { buffer: 1, slot }).await
 }
 
 #[embassy_executor::task]

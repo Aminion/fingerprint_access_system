@@ -5,22 +5,14 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer};
 
-use crate::{
-    fingerprint_irq_task::FINGERPRINT_IRQ_STATUS,
-    fingerprint_task::{SensorCommand, FINGERPRINT_CHANNEL},
-    request::request,
-};
-
-static DONE: Signal<CriticalSectionRawMutex, bool> = Signal::new();
+/// Signaled by the fingerprint manager on a match.
+pub static UNLOCK_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 #[embassy_executor::task]
 pub async fn unlock_task(mut pwm: SimplePwm<'static, TIM1>) {
-    let mut receiver = FINGERPRINT_IRQ_STATUS.receiver().expect("FINGERPRINT_IRQ_STATUS: all receiver slots taken");
     loop {
-        receiver.changed_and(|v| *v).await;
-        if request(&FINGERPRINT_CHANNEL, &DONE, SensorCommand::ValidateAccess).await {
-            unlock(&mut pwm).await;
-        }
+        UNLOCK_SIGNAL.wait().await;
+        unlock(&mut pwm).await;
     }
 }
 
